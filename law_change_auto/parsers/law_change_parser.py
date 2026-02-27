@@ -60,6 +60,9 @@ def _extract_texts_from_container(container: BeautifulSoup) -> list[str]:
     for elem in container.find_all(True):
         if elem.name in ("a", "img", "button"):
             continue
+        # 자식 태그가 있는 컨테이너는 건너뛰고 말단 요소만 수집
+        if elem.find(True):
+            continue
         if hasattr(elem, "get_text"):
             text = elem.get_text(separator="\n", strip=True)
             if text and not skip_patterns.match(text):

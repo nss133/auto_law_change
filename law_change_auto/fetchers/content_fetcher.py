@@ -87,8 +87,11 @@ def fetch_revision_html(meta: LawChangeMeta) -> str | None:
         # 예: lsInfoP.do?lsiSeq=255535&viewCls=lsRvsDocInfoR
         url = f"https://www.law.go.kr/lsInfoP.do?lsiSeq={meta.lsi_seq}&viewCls=lsRvsDocInfoR"
     elif meta.law_type == "admrul" and meta.admrul_seq:
-        # 행정규칙: 기본 정보 페이지 (개정이유 포함)
-        url = f"https://www.law.go.kr/admRulLsInfoP.do?admRulSeq={meta.admrul_seq}"
+        # 행정규칙: 제정·개정이유 페이지 (urlMode=admRulRvsInfoR)
+        url = (
+            "https://www.law.go.kr/admRulInfoP.do"
+            f"?admRulSeq={meta.admrul_seq}&urlMode=admRulRvsInfoR"
+        )
     else:
         return None
 
