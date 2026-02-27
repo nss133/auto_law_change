@@ -60,9 +60,6 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
         if target_date_str not in block or "시행" not in block:
             continue
 
-        if re.search(r"⊙법률 제\d+호", block):
-            return "", None
-
         meta_match = _META_LINE_RE.search(block)
         metadata = None
         if meta_match:

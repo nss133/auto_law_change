@@ -156,9 +156,6 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as e:
             print(f"[law_change_auto] 신구법비교 조회 실패: {meta.law_name}: {e}")
 
-        if not revision_html and not revision_text_from_list and not old_new_xml:
-            continue
-
         detail = parse_law_change(
             meta, revision_html, old_new_xml, revision_text_from_list=revision_text_from_list
         )
