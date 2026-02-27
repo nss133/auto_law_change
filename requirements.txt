@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+lxml
+python-docx
+pandas
+openpyxl
+python-Levenshtein
