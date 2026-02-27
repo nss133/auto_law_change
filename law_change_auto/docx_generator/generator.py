@@ -16,7 +16,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Mm, Pt
 
-from ..models import LawChangeDetail, LawChangeDetailSeq
+from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta
 
 
 LINE_SPACING_BODY = 1.5
@@ -207,6 +207,13 @@ def _clean_revision_paras(paras: List[str]) -> List[str]:
     return result
 
 
+def _fallback_reason_message(meta: LawChangeMeta) -> str:
+    """개정이유 본문을 수집하지 못했을 때 기본 안내 문구를 생성한다."""
+    if meta.category == "행정규칙":
+        return "행정규칙의 제정·개정이유 본문은 국가법령정보센터 행정규칙 화면에서 별도로 확인해 주세요."
+    return "※ 개정이유 정보를 자동으로 추출하지 못했습니다. 원문을 직접 확인하세요."
+
+
 def _detail_to_docx(detail: LawChangeDetail, target_date: date, generator: DocxGenerator) -> None:
     meta = detail.meta
 
@@ -243,13 +250,13 @@ def _detail_to_docx(detail: LawChangeDetail, target_date: date, generator: DocxG
         if paras:
             generator.add_section("1", "개정이유 및 주요내용", paras)
         else:
-            generator.add_section("1", "개정이유 및 주요내용", "")
+            generator.add_section("1", "개정이유 및 주요내용", _fallback_reason_message(meta))
     else:
         reason_paras = detail.reason_sections or []
         if reason_paras:
             generator.add_section("1", "개정이유", reason_paras)
         else:
-            generator.add_section("1", "개정이유", "")
+            generator.add_section("1", "개정이유", _fallback_reason_message(meta))
 
         generator.add_section("2", "주요내용")
         generator.add_main_contents(intro_paragraphs=detail.main_change_sections or None)

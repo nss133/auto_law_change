@@ -15,7 +15,7 @@ HEADERS = {
 
 
 _META_LINE_RE = re.compile(
-    r"\[시행\s+[^\]]+\]\s*\[법률\s*제(\d+)호,\s*([^,\]]+),\s*([^\]]+)\]"
+    r"\[시행\s+[^\]]+\]\s*\[(?:법률|대통령령|총리령|부령)\s*제(\d+)호,\s*([^,\]]+),\s*([^\]]+)\]"
 )
 
 
@@ -61,7 +61,7 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
             continue
 
         if re.search(r"⊙법률 제\d+호", block):
-            return "", None, None
+            return "", None
 
         meta_match = _META_LINE_RE.search(block)
         metadata = None

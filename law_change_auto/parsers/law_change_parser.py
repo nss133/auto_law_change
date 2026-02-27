@@ -8,33 +8,118 @@ import re
 from ..models import ArticleComparisonRow, LawChangeDetail, LawChangeMeta
 
 
-def _parse_revision_reason(html: str) -> list[str]:
-    """제·개정이유 영역(rvsBot~rvsTop 사이) 전체 텍스트를 한 덩어리로 반환."""
-    soup = BeautifulSoup(html, "lxml")
+def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
+    """법령 lsInfoP?viewCls=lsRvsDocInfoR 파싱.
 
+    rvsBot/rvsTop는 위치 마커(div)이고, 그 사이 형제 노드들의 텍스트가 실제 개정이유이다.
+    """
     rvs_bot = soup.find(id="rvsBot")
     rvs_top = soup.find(id="rvsTop")
-    if not rvs_bot:
+    if not rvs_bot or not rvs_top:
         return []
 
-    between_parts: list[str] = []
-    node = rvs_bot.find_next_sibling()
-    while node:
-        if getattr(node, "get", None) and node.get("id") == "rvsTop":
+    results: list[str] = []
+    for sibling in rvs_bot.find_next_siblings():
+        if getattr(sibling, "get", None) and sibling.get("id") == "rvsTop":
             break
-        if hasattr(node, "get_text"):
-            txt = node.get_text(separator=" ", strip=True)
-            if txt:
-                between_parts.append(txt)
-        node = node.find_next_sibling()
+        if hasattr(sibling, "get_text"):
+            text = sibling.get_text(separator="\n", strip=True)
+            if text and text not in ("【제정·개정이유】",):
+                results.append(text)
 
-    full_text = " ".join(between_parts).strip()
-    if not full_text:
-        return []
+    # 타법개정: 내용이 없고 '타법개정 제개정이유' 버튼만 있는 경우는 상위에서 따로 처리할 수 있도록 특수 마커 반환
+    joined = "\n".join(results)
+    if not joined:
+        talbeop_btn = soup.find(string=re.compile(r"타법개정\s*제개정이유"))
+        if talbeop_btn:
+            return ["__TALBEOP_KAEJUNG__"]
+    return results
 
-    # 공백 정리만 하고 그대로 사용
-    cleaned = re.sub(r"\s+", " ", full_text).strip()
-    return [cleaned] if cleaned else []
+
+def _parse_admrul_revision(soup: BeautifulSoup) -> list[str]:
+    """행정규칙 admRulInfoP?urlMode=admRulRvsInfoR 파싱.
+
+    rvsBot/rvsTop 없이 rvsConScroll 내에 제정·개정이유가 위치.
+    """
+    scroll_div = soup.find(id="rvsConScroll")
+    if scroll_div:
+        return _extract_texts_from_container(scroll_div)
+
+    content_body = soup.find(id="contentBody")
+    if content_body:
+        return _extract_after_header(content_body, "제정·개정이유")
+
+    return []
+
+
+def _extract_texts_from_container(container: BeautifulSoup) -> list[str]:
+    """컨테이너 내 텍스트 노드 수집 (버튼/링크 제외)."""
+    results: list[str] = []
+    skip_patterns = re.compile(r"^(【제정·개정문】|제정·개정이유보기|전체 제정·개정문보기)$")
+
+    for elem in container.find_all(True):
+        if elem.name in ("a", "img", "button"):
+            continue
+        if hasattr(elem, "get_text"):
+            text = elem.get_text(separator="\n", strip=True)
+            if text and not skip_patterns.match(text):
+                results.append(text)
+    return results
+
+
+def _extract_after_header(container: BeautifulSoup, header_keyword: str) -> list[str]:
+    """헤더 키워드 이후 텍스트 수집 (패턴 기반 fallback)."""
+    all_text = container.get_text(separator="\n")
+    lines = [l.strip() for l in all_text.split("\n") if l.strip()]
+
+    collecting = False
+    results: list[str] = []
+    stop_patterns = re.compile(r"^【제정·개정문】")
+
+    for line in lines:
+        if header_keyword in line:
+            collecting = True
+            continue
+        if collecting:
+            if stop_patterns.match(line):
+                break
+            results.append(line)
+    return results
+
+
+def _extract_fallback(soup: BeautifulSoup) -> list[str]:
+    """어떤 구조도 매칭 안 됐을 때 최후 수단."""
+    diamond_texts: list[str] = []
+    for elem in soup.find_all(string=re.compile(r"^◇")):
+        parent = getattr(elem, "parent", None)
+        if parent and hasattr(parent, "get_text"):
+            block = parent.get_text(separator="\n", strip=True)
+            diamond_texts.append(block)
+
+    if diamond_texts:
+        return diamond_texts
+
+    return ["※ 개정이유 정보를 자동으로 추출하지 못했습니다. 원문을 직접 확인하세요."]
+
+
+def _parse_revision_reason(html: str, source_type: str = "ls") -> list[str]:
+    """제·개정이유 텍스트를 리스트로 반환.
+
+    source_type: "ls" (법령) | "admrul" (행정규칙)
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    if source_type == "ls":
+        results = _parse_ls_revision(soup)
+    elif source_type == "admrul":
+        results = _parse_admrul_revision(soup)
+    else:
+        results = []
+
+    if not results:
+        results = _extract_fallback(soup)
+
+    return results
 
 
 def _clean_markup(text: str) -> str:
@@ -123,7 +208,8 @@ def parse_law_change(
     if revision_text_from_list:
         detail.combined_reason_and_main_sections.append(revision_text_from_list)
     elif revision_html:
-        combined = _parse_revision_reason(revision_html)
+        source_type = "admrul" if meta.law_type == "admrul" else "ls"
+        combined = _parse_revision_reason(revision_html, source_type=source_type)
         detail.combined_reason_and_main_sections.extend(combined)
 
     if old_new_html:
