@@ -7,6 +7,9 @@ import re
 
 from ..models import ArticleComparisonRow, LawChangeDetail, LawChangeMeta
 
+# 타법개정 특수 마커 (lsInfoP 페이지에 본문 없이 버튼만 있는 경우)
+_TALBEOP_MARKER = "__TALBEOP_KAEJUNG__"
+
 
 def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
     """법령 lsInfoP?viewCls=lsRvsDocInfoR 파싱.
@@ -32,7 +35,7 @@ def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
     if not joined:
         talbeop_btn = soup.find(string=re.compile(r"타법개정\s*제개정이유"))
         if talbeop_btn:
-            return ["__TALBEOP_KAEJUNG__"]
+            return [_TALBEOP_MARKER]
     return results
 
 
@@ -119,6 +122,10 @@ def _parse_revision_reason(html: str, source_type: str = "ls") -> list[str]:
     else:
         results = []
 
+    # 타법개정 마커는 fallback 없이 그대로 반환 (상위에서 처리)
+    if results == [_TALBEOP_MARKER]:
+        return results
+
     if not results:
         results = _extract_fallback(soup)
 
@@ -126,15 +133,15 @@ def _parse_revision_reason(html: str, source_type: str = "ls") -> list[str]:
 
 
 def _clean_markup(text: str) -> str:
-    """XML 내에 섞여 있는 HTML 태그(<p>, <br> 등)를 정리한다."""
+    """XML 내에 섞여 있는 HTML 태그(<p>, <br>\n등)를 정리한다."""
     if not text:
         return ""
     # HTML 엔티티 해제
     text = html_module.unescape(text)
     # 단순한 p/br 태그를 개행으로
+    text = re.sub(r"<br\s*/?>" , "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<p\s*>" , "", text, flags=re.IGNORECASE)
     text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<p\s*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     # 남은 태그 제거
     text = re.sub(r"<[^>]+>", "", text)
     # 연속 개행 정리
@@ -145,7 +152,6 @@ def _clean_markup(text: str) -> str:
 def _parse_old_new_table(xml_str: str) -> list[ArticleComparisonRow]:
     """신구법비교 XML에서 신·구 구조문 대비표를 파싱."""
     rows: list[ArticleComparisonRow] = []
-
     try:
         root = ET.fromstring(xml_str)
     except ET.ParseError:
@@ -167,7 +173,6 @@ def _parse_old_new_table(xml_str: str) -> list[ArticleComparisonRow]:
 
     old_items = find_all(old_container, "조문")
     new_items = find_all(new_container, "조문")
-
     max_len = max(len(old_items), len(new_items))
     for i in range(max_len):
         old_el = old_items[i] if i < len(old_items) else None
@@ -182,7 +187,6 @@ def _parse_old_new_table(xml_str: str) -> list[ArticleComparisonRow]:
         new_text = _clean_markup(text_from(new_el))
         if not (old_text or new_text):
             continue
-
         rows.append(
             ArticleComparisonRow(
                 article_no=None,
@@ -191,7 +195,6 @@ def _parse_old_new_table(xml_str: str) -> list[ArticleComparisonRow]:
                 new_text=new_text or None,
             )
         )
-
     return rows
 
 
@@ -207,16 +210,14 @@ def parse_law_change(
     없을 때만 revision_html을 파싱한다.
     """
     detail = LawChangeDetail(meta=meta)
-
     if revision_text_from_list:
         detail.combined_reason_and_main_sections.append(revision_text_from_list)
     elif revision_html:
         source_type = "admrul" if meta.law_type == "admrul" else "ls"
         combined = _parse_revision_reason(revision_html, source_type=source_type)
-        detail.combined_reason_and_main_sections.extend(combined)
-
+        # 타법개정 마커는 DOCX에 출력하지 않고 스킵 (cli.py에서 continue로 처리됨)
+        if combined != [_TALBEOP_MARKER]:
+            detail.combined_reason_and_main_sections.extend(combined)
     if old_new_html:
         detail.article_comparisons.extend(_parse_old_new_table(old_new_html))
-
     return detail
-
