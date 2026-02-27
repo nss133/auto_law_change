@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] dry-run 모드이므로 DOCX를 생성하지 않습니다.")
         return
 
-    # 2. 국가법령정보센터 Open API에서 변경 목록 조회 (현재는 fetcher가 비어 있어 항상 0건일 수 있음)
+    # 2. 국가법령정보센터 Open API에서 변경 목록 조회
     try:
         law_metas: List[LawChangeMeta] = get_law_changes_for_monitored(
             monitored_laws, target_date
@@ -90,18 +90,18 @@ def main(argv: list[str] | None = None) -> None:
     print(f"[law_change_auto] 수집된 원천 변경 건수: {len(all_metas)}")
 
     if law_metas:
-        print("[law_change_auto]  └ 법령 변경 목록:")
+        print("[law_change_auto] └ 법령 변경 목록:")
         for m in law_metas:
             anc = m.announcement_date.isoformat() if m.announcement_date else "-"
             eff = m.effective_date.isoformat() if m.effective_date else "-"
-            print(f"    - {m.law_name} ({m.change_type}, 공포={anc}, 시행={eff})")
+            print(f"  - {m.law_name} ({m.change_type}, 공포={anc}, 시행={eff})")
 
     if admin_rule_metas:
-        print("[law_change_auto]  └ 행정규칙 변경 목록:")
+        print("[law_change_auto] └ 행정규칙 변경 목록:")
         for m in admin_rule_metas:
             anc = m.announcement_date.isoformat() if m.announcement_date else "-"
             eff = m.effective_date.isoformat() if m.effective_date else "-"
-            print(f"    - {m.law_name} ({m.change_type}, 발령={anc}, 시행={eff})")
+            print(f"  - {m.law_name} ({m.change_type}, 발령={anc}, 시행={eff})")
 
     # 3. 모니터링 대상과 유사도 기반 매칭
     matches: List[MatchResult] = match_laws(monitored_laws, all_metas, threshold=0.8)
@@ -156,6 +156,10 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as e:
             print(f"[law_change_auto] 신구법비교 조회 실패: {meta.law_name}: {e}")
 
+        # 개정이유/신구조문 모두 없으면 스킵
+        if not revision_html and not revision_text_from_list and not old_new_xml:
+            continue
+
         detail = parse_law_change(
             meta, revision_html, old_new_xml, revision_text_from_list=revision_text_from_list
         )
@@ -185,4 +189,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
