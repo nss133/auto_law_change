@@ -131,10 +131,10 @@ def main(argv: list[str] | None = None) -> None:
 
         if meta.law_type == "ls" and meta.law_id and meta.effective_date:
             date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
-            chr_cls_cd = meta.chr_cls_cd or "010202"
+            chr_cls_cd = meta.chr_cls_cd or "010001"
             try:
                 text, display_meta = fetch_revision_reason_from_ls_rvs_rsn_list(
-                    meta.law_id, chr_cls_cd, date_str
+                    meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq
                 )
                 if text:
                     revision_text_from_list = text

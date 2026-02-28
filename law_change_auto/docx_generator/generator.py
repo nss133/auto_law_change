@@ -7,8 +7,7 @@ from typing import List, Tuple
 
 # 개정이유 본문에서 목차와 중복되는 접두어 제거 (예: [일부개정], ◇ 개정이유 및 주요내용)
 _REVISION_PREFIXES = re.compile(
-    r"^\s*(\[일부개정\]|\[전부개정\]|\[타법개정\]|\[제정\]|◇\s*개정이유\s*및\s*주요내용|◇\s*개정이유|◇\s*주요내용)\s*
-?"
+    r"^\s*(\[일부개정\]|\[전부개정\]|\[타법개정\]|\[제정\]|◇\s*개정이유\s*및\s*주요내용|◇\s*개정이유|◇\s*주요내용)\s*"
 )
 
 from docx import Document
@@ -198,8 +197,7 @@ def _clean_revision_paras(paras: List[str]) -> List[str]:
             if not m:
                 break
             text = text[m.end() :].strip()
-        for line in text.split("
-"):
+        for line in text.split("\n"):
             line = line.strip()
             if line:
                 result.append(line)

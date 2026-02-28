@@ -26,14 +26,12 @@ def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
         if getattr(sibling, "get", None) and sibling.get("id") == "rvsTop":
             break
         if hasattr(sibling, "get_text"):
-            text = sibling.get_text(separator="
-", strip=True)
+            text = sibling.get_text(separator="\n", strip=True)
             if text and text not in ("【제정·개정이유】",):
                 results.append(text)
 
     # 타법개정: 내용이 없고 '타법개정 제개정이유' 버튼만 있는 경우는 상위에서 따로 처리할 수 있도록 특수 마커 반환
-    joined = "
-".join(results)
+    joined = "\n".join(results)
     if not joined:
         talbeop_btn = soup.find(string=re.compile(r"타법개정\s*제개정이유"))
         if talbeop_btn:
@@ -69,8 +67,7 @@ def _extract_texts_from_container(container: BeautifulSoup) -> list[str]:
         if elem.find(True):
             continue
         if hasattr(elem, "get_text"):
-            text = elem.get_text(separator="
-", strip=True)
+            text = elem.get_text(separator="\n", strip=True)
             if text and not skip_patterns.match(text):
                 results.append(text)
     return results
@@ -78,10 +75,8 @@ def _extract_texts_from_container(container: BeautifulSoup) -> list[str]:
 
 def _extract_after_header(container: BeautifulSoup, header_keyword: str) -> list[str]:
     """헤더 키워드 이후 텍스트 수집 (패턴 기반 fallback)."""
-    all_text = container.get_text(separator="
-")
-    lines = [l.strip() for l in all_text.split("
-") if l.strip()]
+    all_text = container.get_text(separator="\n")
+    lines = [l.strip() for l in all_text.split("\n") if l.strip()]
 
     collecting = False
     results: list[str] = []
@@ -104,8 +99,7 @@ def _extract_fallback(soup: BeautifulSoup) -> list[str]:
     for elem in soup.find_all(string=re.compile(r"^◇")):
         parent = getattr(elem, "parent", None)
         if parent and hasattr(parent, "get_text"):
-            block = parent.get_text(separator="
-", strip=True)
+            block = parent.get_text(separator="\n", strip=True)
             diamond_texts.append(block)
 
     if diamond_texts:
@@ -146,18 +140,13 @@ def _clean_markup(text: str) -> str:
     # HTML 엔티티 해제
     text = html_module.unescape(text)
     # 단순한 p/br 태그를 개행으로
-    text = re.sub(r"<br\s*/?>", "
-", text, flags=re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<p\s*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"</p\s*>", "
-", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
     # 남은 태그 제거
     text = re.sub(r"<[^>]+>", "", text)
     # 연속 개행 정리
-    text = re.sub(r"
-{3,}", "
-
-", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -210,6 +199,30 @@ def _parse_old_new_table(xml_str: str) -> list[ArticleComparisonRow]:
     return rows
 
 
+def _split_eflaw_reason_and_main(text: str) -> tuple[list[str], list[str]]:
+    """eflaw 본문을 '◇ 주요내용' 경계로 개정이유 / 주요내용으로 분리."""
+    reason_blocks: list[str] = []
+    main_blocks: list[str] = []
+    if not text:
+        return reason_blocks, main_blocks
+
+    # "◇ 주요내용" 또는 "◇ 개정이유 및 주요내용"으로 분할
+    main_header = "◇ 주요내용"
+    combined_header = "◇ 개정이유 및 주요내용"
+    if main_header in text:
+        before, after = text.split(main_header, 1)
+        reason_blocks.append(before.strip())
+        main_blocks.append(after.strip())
+    elif combined_header in text:
+        before, after = text.split(combined_header, 1)
+        reason_blocks.append(before.strip())
+        main_blocks.append(after.strip())
+    else:
+        reason_blocks.append(text.strip())
+
+    return reason_blocks, main_blocks
+
+
 def parse_law_change(
     meta: LawChangeMeta,
     revision_html: str | None,
@@ -224,34 +237,35 @@ def parse_law_change(
     detail = LawChangeDetail(meta=meta)
 
     # 1. 제·개정이유 수집
-    reason_lines = []
+    reason_lines: list[str] = []
     if revision_text_from_list:
-        reason_lines.append(revision_text_from_list)
+        # eflaw: ◇ 주요내용 경계로 개정이유/주요내용 분리
+        reason_blocks, main_blocks = _split_eflaw_reason_and_main(revision_text_from_list)
+        detail.reason_sections = [b for b in reason_blocks if b]
+        detail.main_change_sections = [b for b in main_blocks if b]
+        detail.combined_reason_and_main_sections = reason_blocks + main_blocks
     elif revision_html:
         source_type = "admrul" if meta.law_type == "admrul" else "ls"
         combined = _parse_revision_reason(revision_html, source_type=source_type)
-        if combined != [_TALBEOP_MARKER]:
-            reason_lines.extend(combined)
-
-    # 2. 개정이유와 주요내용 분리 (◇ 기호 기반)
-    current_reason = []
-    current_main = []
-    is_main_section = False
-
-    for line in reason_lines:
-        # "주요내용" 키워드가 포함된 ◇ 제목이 나오면 그 이후는 주요내용으로 간주
-        if "◇" in line and "주요내용" in line:
-            is_main_section = True
-        
-        if is_main_section:
-            current_main.append(line)
+        if combined == [_TALBEOP_MARKER]:
+            detail.reason_sections = combined
+            detail.main_change_sections = []
+            detail.combined_reason_and_main_sections = combined
         else:
-            current_reason.append(line)
-
-    detail.reason_sections = current_reason
-    detail.main_change_sections = current_main
-    # 하위 호환성을 위해 combined도 유지
-    detail.combined_reason_and_main_sections = reason_lines
+            # HTML: 줄 단위로 개정이유/주요내용 분리
+            current_reason = []
+            current_main = []
+            is_main_section = False
+            for line in combined:
+                if "◇" in line and "주요내용" in line:
+                    is_main_section = True
+                if is_main_section:
+                    current_main.append(line)
+                else:
+                    current_reason.append(line)
+            detail.reason_sections = current_reason
+            detail.main_change_sections = current_main
+            detail.combined_reason_and_main_sections = combined
 
     # 3. 신구조문 대비표
     if old_new_html:
