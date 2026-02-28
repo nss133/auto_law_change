@@ -1,124 +1,106 @@
 from __future__ import annotations
-
 import re
 import requests
 from bs4 import BeautifulSoup
-
 from ..models import LawChangeMeta
 from .national_law_fetcher import _get_oc
-
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (law_change_auto)",
     "Referer": "https://www.law.go.kr/",
 }
 
-
-_META_LINE_RE = re.compile(
-    r"\[시행\s+[^\]]+\]\s*\[(?:법률|대통령령|총리령|부령)\s*제(\d+)호,\s*([^,\]]+),\s*([^\]]+)\]"
-)
-
-
 def fetch_revision_reason_from_ls_rvs_rsn_list(
     ls_id: str,
     chr_cls_cd: str,
     target_date_str: str,
 ) -> tuple[str, dict | None]:
-    """lsRvsRsnListP.do에서 특정 시행일 버전의 개정이유를 추출한다.
-
-    <법제처 제공>으로 구분된 블록 중 target_date_str이 포함된 시행 블록을 찾고,
-    해당 블록에서 【제정·개정이유】 이후 텍스트를 반환한다.
-    블록 내에 "⊙법률 제...호" 패턴이 있으면 타법개정으로 보고 빈 문자열을 반환한다.
-
-    Args:
-        ls_id: 법령 ID (예: "001532")
-        chr_cls_cd: 개정구분코드 (예: "010202")
-        target_date_str: 찾을 시행일 (예: "2024. 10. 25.")
-
-    Returns:
-        (개정이유 텍스트, 메타데이터 또는 None). 메타데이터는 law_number, amendment_date_str, amendment_type 키를 가짐.
-    """
+    \"\"\"
+    OpenAPI target=eflaw 를 사용하여 제·개정이유를 가져온다.
+    기존 lsRvsRsnListP.do 크롤링 방식은 레이아웃 변화에 취약하므로 OpenAPI를 사용하도록 수정.
+    \"\"\"
+    # 날짜 포맷 변환 (예: \"2024. 10. 25.\" -> \"20241025\")
+    ef_yd = re.sub(r\"[^0-9]\", \"\", target_date_str)
+    
+    oc = _get_oc()
+    # eflaw API는 ID(ls_id)와 MST(lsi_seq)를 모두 지원하며, 
+    # 제개정이유내용(제·개정이유) 및 개정문내용(신구조문대비표 포함) 필드를 제공한다.
     url = (
-        "https://www.law.go.kr/LSW/lsRvsRsnListP.do"
-        f"?lsId={ls_id}&chrClsCd={chr_cls_cd}&lsRvsGubun=all"
+        \"http://www.law.go.kr/DRF/lawService.do\"
+        f\"?OC={oc}&target=eflaw&ID={ls_id}&efYd={ef_yd}&chrClsCd={chr_cls_cd}&type=XML\"
     )
-    resp = requests.get(url, headers=HEADERS, timeout=10)
-    resp.encoding = "utf-8"
-    full_text = resp.text
-
-    wrap = BeautifulSoup(full_text, "html.parser").find(id="viewwrapCenter")
-    if not wrap:
-        return "", None
-
-    body_text = wrap.get_text(separator="\n", strip=True)
-    blocks = re.split(r"\s*<법제처 제공>\s*", body_text)
-
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
-        if target_date_str not in block or "시행" not in block:
-            continue
-
-        meta_match = _META_LINE_RE.search(block)
+    
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.encoding = \"utf-8\"
+        soup = BeautifulSoup(resp.text, \"xml\")
+        
+        reason_tag = soup.find(\"제개정이유내용\")
+        reason_text = reason_tag.get_text(strip=True) if reason_tag else \"\"
+        
+        # 메타데이터 추출 (기존 모델과 호환성 유지)
         metadata = None
-        if meta_match:
+        law_num = soup.find(\"공포번호\")
+        pub_date = soup.find(\"공포일자\")
+        amd_type = soup.find(\"제개정구분\")
+        
+        if law_num and pub_date and amd_type:
+            pub_date_val = pub_date.get_text(strip=True)
+            # 날짜 형식 보정 (YYYYMMDD -> YYYY. M. D.)
+            if len(pub_date_val) == 8:
+                y, m, d = pub_date_val[:4], int(pub_date_val[4:6]), int(pub_date_val[6:])
+                pub_date_val = f\"{y}. {m}. {d}.\"
+                
             metadata = {
-                "law_number": meta_match.group(1),
-                "amendment_date_str": meta_match.group(2).strip(),
-                "amendment_type": meta_match.group(3).strip(),
+                \"law_number\": law_num.get_text(strip=True),
+                \"amendment_date_str\": pub_date_val,
+                \"amendment_type\": amd_type.get_text(strip=True),
             }
-
-        reason_start = block.find("【제정·개정이유】")
-        if reason_start == -1:
-            return "", metadata
-        reason_text = block[reason_start + len("【제정·개정이유】") :].strip()
+        
         return reason_text, metadata
-
-    return "", None
-
+    except Exception:
+        return \"\", None
 
 def fetch_revision_html(meta: LawChangeMeta) -> str | None:
-    """법령/행정규칙의 제정·개정이유 HTML을 가져온다."""
-    if meta.law_type == "ls" and meta.lsi_seq:
-        # 예: lsInfoP.do?lsiSeq=255535&viewCls=lsRvsDocInfoR
-        url = f"https://www.law.go.kr/lsInfoP.do?lsiSeq={meta.lsi_seq}&viewCls=lsRvsDocInfoR"
-    elif meta.law_type == "admrul" and meta.admrul_seq:
-        # 행정규칙: 제정·개정이유 페이지 (urlMode=admRulRvsInfoR)
+    \"\"\"법령/행정규칙의 제정·개정이유 HTML을 가져온다.\"\"\"
+    if meta.law_type == \"ls\" and meta.lsi_seq:
+        url = f\"https://www.law.go.kr/lsInfoP.do?lsiSeq={meta.lsi_seq}&viewCls=lsRvsDocInfoR\"
+    elif meta.law_type == \"admrul\" and meta.admrul_seq:
         url = (
-            "https://www.law.go.kr/admRulInfoP.do"
-            f"?admRulSeq={meta.admrul_seq}&urlMode=admRulRvsInfoR"
+            \"https://www.law.go.kr/admRulInfoP.do\"
+            f\"?admRulSeq={meta.admrul_seq}&urlMode=admRulRvsInfoR\"
         )
     else:
         return None
 
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    resp.encoding = "utf-8"
-    return resp.text
-
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        resp.encoding = \"utf-8\"
+        return resp.text
+    except Exception:
+        return None
 
 def fetch_old_new_html(meta: LawChangeMeta) -> str | None:
-    """법령/행정규칙의 신·구조문 대비표 XML을 가져온다."""
+    \"\"\"법령/행정규칙의 신·구조문 대비표 XML을 가져온다.\"\"\"
     oc = _get_oc()
-
-    if meta.law_type == "ls" and meta.lsi_seq:
-        # 법령 신구법비교: target=oldAndNew, MST=법령일련번호
+    if meta.law_type == \"ls\" and meta.lsi_seq:
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
-            f"?OC={oc}&target=oldAndNew&MST={meta.lsi_seq}&type=XML"
+            \"http://www.law.go.kr/DRF/lawService.do\"
+            f\"?OC={oc}&target=oldAndNew&MST={meta.lsi_seq}&type=XML\"
         )
-    elif meta.law_type == "admrul" and meta.admrul_seq:
-        # 행정규칙 신구법비교: target=admrulOldAndNew, ID=행정규칙일련번호
+    elif meta.law_type == \"admrul\" and meta.admrul_seq:
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
-            f"?OC={oc}&target=admrulOldAndNew&ID={meta.admrul_seq}&type=XML"
+            \"http://www.law.go.kr/DRF/lawService.do\"
+            f\"?OC={oc}&target=admrulOldAndNew&ID={meta.admrul_seq}&type=XML\"
         )
     else:
         return None
 
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    resp.encoding = "utf-8"
-    return resp.text
-
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        resp.encoding = \"utf-8\"
+        return resp.text
+    except Exception:
+        return None
