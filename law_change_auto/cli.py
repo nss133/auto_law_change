@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 from dotenv import load_dotenv
 
@@ -22,6 +22,8 @@ from .fetchers.national_law_fetcher import (
     get_admin_rule_changes_for_monitored,
     get_law_changes_for_monitored,
     get_recent_admin_rule_changes,
+    get_recent_admin_rule_changes_range,
+    get_recent_law_changes_range,
 )
 from .fetchers.content_fetcher import (
     fetch_old_new_html,
@@ -165,6 +167,82 @@ def _collect_details_for_date(
         )
         details.append(detail)
 
+    return details
+
+
+def _fetch_detail_for_meta(
+    m: MatchResult,
+) -> Tuple[MatchResult, str | None, str | None, str | None]:
+    """한 건 메타에 대해 개정이유·신구비교를 조회. 병렬 실행용."""
+    meta = m.meta
+    revision_html: str | None = None
+    revision_text_from_list: str | None = None
+    old_new_xml: str | None = None
+    if meta.law_type == "ls" and meta.law_id and meta.effective_date:
+        date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
+        chr_cls_cd = meta.chr_cls_cd or "010001"
+        try:
+            text, display_meta = fetch_revision_reason_from_ls_rvs_rsn_list(
+                meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq
+            )
+            if text:
+                revision_text_from_list = text
+            if display_meta:
+                meta.law_number = display_meta.get("law_number")
+                meta.amendment_date_str = display_meta.get("amendment_date_str")
+                meta.amendment_type = display_meta.get("amendment_type")
+        except Exception:
+            pass
+    if not revision_text_from_list:
+        try:
+            revision_html = fetch_revision_html(meta)
+        except Exception:
+            pass
+    try:
+        old_new_xml = fetch_old_new_html(meta)
+    except Exception:
+        pass
+    return (m, revision_text_from_list, revision_html, old_new_xml)
+
+
+def _collect_details_for_range(
+    date_from: dt.date,
+    date_to: dt.date,
+    monitored_laws: List[MonitoredLaw],
+    law_filter: str,
+    max_workers: int = 5,
+) -> List[LawChangeDetail]:
+    """기간 내 법령·행정규칙 변경 상세를 기간 API + 병렬 조회로 수집."""
+    law_metas: List[LawChangeMeta] = []
+    admin_rule_metas: List[LawChangeMeta] = []
+    try:
+        law_metas = get_recent_law_changes_range(date_from, date_to)
+        admin_rule_metas = get_recent_admin_rule_changes_range(date_from, date_to)
+    except Exception as e:
+        print(f"[law_change_auto] 경고: Open API 호출 중 오류 발생: {e}")
+
+    all_metas = [*law_metas, *admin_rule_metas]
+    matches = match_laws(monitored_laws, all_metas, threshold=0.8)
+    if law_filter:
+        matches = [m for m in matches if law_filter in m.meta.law_name]
+
+    details: List[LawChangeDetail] = []
+    if not matches:
+        return details
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_detail_for_meta, m): m for m in matches}
+        for future in as_completed(futures):
+            try:
+                m, revision_text, revision_html, old_new_xml = future.result()
+                if not revision_html and not revision_text and not old_new_xml:
+                    continue
+                detail = parse_law_change(
+                    m.meta, revision_html, old_new_xml, revision_text_from_list=revision_text
+                )
+                details.append(detail)
+            except Exception:
+                pass
     return details
 
 
@@ -346,15 +424,10 @@ def _process_comprehensive_period(
     date_from: dt.date,
     date_to: dt.date,
 ) -> List[Path]:
-    """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성."""
-    all_details: List[LawChangeDetail] = []
-
-    for d in _date_range(date_from, date_to):
-        details = _collect_details_for_date(d, monitored_laws, law_filter)
-        for detail in details:
-            all_details.append(detail)
-        if details:
-            time.sleep(1.5)
+    """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성. (기간 API + 병렬로 단축)"""
+    all_details: List[LawChangeDetail] = _collect_details_for_range(
+        date_from, date_to, monitored_laws, law_filter
+    )
 
     legis_details = _collect_legislation_details(
         output_dir, monitored_laws, law_filter, date_from, date_to
