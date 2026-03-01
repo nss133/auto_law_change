@@ -6,7 +6,7 @@ from typing import Literal, Sequence
 
 
 LawCategory = Literal["법령", "행정규칙", "입법예고"]
-ChangeType = Literal["공포", "시행", "일부개정", "전부개정", "정정", "입법예고", "기타"]
+ChangeType = Literal["공포", "시행", "일부개정", "전부개정", "정정", "입법예고", "규정변경예고", "기타"]
 
 
 @dataclass
@@ -57,6 +57,8 @@ class LawChangeDetail:
     main_change_sections: list[str] = field(default_factory=list)
     combined_reason_and_main_sections: list[str] = field(default_factory=list)
     article_comparisons: list[ArticleComparisonRow] = field(default_factory=list)
+    opinion_deadline: str | None = None  # 입법예고/규정변경예고 의견제출 마감일 (예: "2026. 4. 7.")
+    comparison_pdf_paths: list[tuple[str, str]] = field(default_factory=list)  # [(label, saved_path), ...] 입법예고용
 
     def has_any_content(self) -> bool:
         return any(

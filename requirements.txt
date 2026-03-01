@@ -1,7 +1,10 @@
 requests
 beautifulsoup4
+python-dotenv
 lxml
 python-docx
 pandas
 openpyxl
 python-Levenshtein
+pymupdf
+pdfplumber

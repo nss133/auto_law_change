@@ -36,6 +36,18 @@ pip install -r requirements.txt
    ```
 3. `output/` 폴더에 `law_change_guide_YYYYMMDD.docx` 생성
 
+### 입법예고/규정변경예고 모드
+
+금융위원회(FSC) 입법예고·규정변경예고 목록에서 매칭 건의 PDF 첨부를 추출해 안내서를 생성합니다.
+
+```bash
+python -m law_change_auto.cli --legislation --law 자본시장
+# output/law_change_guide_legislation_<noticeId>.docx 생성
+```
+
+- `--legislation`: 입법예고 모드
+- `--law`: 제목에 포함된 검색어 (예: 자본시장, 보험업)
+
 ### 특정 법령(lsiSeq) 기준 테스트
 
 ```bash
