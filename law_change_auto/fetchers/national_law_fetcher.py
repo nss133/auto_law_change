@@ -235,27 +235,9 @@ def get_law_changes_for_monitored(
     return metas
 
 
-def get_recent_admin_rule_changes(target_date: date) -> List[LawChangeMeta]:
-    """지정 일자 기준 행정규칙(훈령·예규·고시 등) 변경 목록을 조회한다.
-
-    - 행정규칙 목록 조회 API (target=admrul)
-    - 발령일자 기간(prmlYd)에 target_date를 범위(당일~당일)로 지정
-    """
-    ymd = target_date.strftime("%Y%m%d")
+def _parse_admin_rule_metas(root: ET.Element, source: str = "law.go.kr:admrul") -> List[LawChangeMeta]:
+    """admrul API 응답에서 LawChangeMeta 목록 추출."""
     metas: List[LawChangeMeta] = []
-
-    try:
-        root = _request_law_search(
-            {
-                "target": "admrul",
-                "prmlYd": f"{ymd}~{ymd}",
-                "display": "100",
-                "page": "1",
-            }
-        )
-    except Exception:
-        return metas
-
     for elem in root.iter():
         name = _get_child_text(elem, "행정규칙명") or _get_child_text(elem, "규칙명")
         if not name:
@@ -278,13 +260,134 @@ def get_recent_admin_rule_changes(target_date: date) -> List[LawChangeMeta]:
                 change_type="공포",
                 announcement_date=_parse_yyyymmdd(prml_yd),
                 effective_date=_parse_yyyymmdd(ef_yd),
-                source="law.go.kr:admrul",
+                source=source,
                 detail_url=detail_url,
                 law_id=rule_id,
                 law_type="admrul",
                 admrul_seq=admrul_seq,
             )
         )
+    return metas
+
+
+def get_recent_admin_rule_changes(target_date: date) -> List[LawChangeMeta]:
+    """지정 일자 기준 행정규칙(훈령·예규·고시 등) 변경 목록을 조회한다.
+
+    - 행정규칙 목록 조회 API (target=admrul)
+    - 발령일자(prmlYd)와 시행일자(efYd) 둘 다 조회하여 병합 (open.law.go.kr 가이드 활용)
+    - nw=1(현행), nw=2(연혁) 둘 다 조회하여 연혁에만 있는 시행 건 포함
+    """
+    ymd = target_date.strftime("%Y%m%d")
+    seen_keys: set[tuple[str | None, str | None]] = set()
+    metas: List[LawChangeMeta] = []
+
+    for nw_val, nw_label in ((None, ""), ("2", ":연혁")):
+        base_params: Dict[str, str] = {"target": "admrul", "display": "100", "page": "1"}
+        if nw_val:
+            base_params["nw"] = nw_val
+
+        for key in ("prmlYd", "efYd"):
+            try:
+                root = _request_law_search(
+                    {
+                        **base_params,
+                        key: f"{ymd}~{ymd}",
+                    }
+                )
+            except Exception:
+                continue
+
+            for m in _parse_admin_rule_metas(
+                root, source=f"law.go.kr:admrul({key}{nw_label})"
+            ):
+                key_tuple = (m.law_name, m.admrul_seq)
+                if key_tuple in seen_keys:
+                    continue
+                seen_keys.add(key_tuple)
+                metas.append(m)
+
+    return metas
+
+
+def get_admin_rule_changes_for_monitored(
+    monitored_laws: List[MonitoredLaw],
+    target_date: date,
+) -> List[LawChangeMeta]:
+    """모니터링 대상 행정규칙명 기준으로 해당 일자 발령/시행 건만 조회.
+
+    - 각 행정규칙명별로 admrul 검색(query=법령명) 후
+    - 시행일자/발령일자가 target_date와 같은 건만 필터링.
+    - nw=1(현행), nw=2(연혁) 둘 다 조회하여 연혁에만 있는 건 포함.
+    """
+    metas: List[LawChangeMeta] = []
+    ymd = target_date.strftime("%Y%m%d")
+    seen_keys: set[tuple[str | None, str | None]] = set()
+
+    for law in monitored_laws:
+        name = law.name.strip()
+        if not name:
+            continue
+
+        for nw_val in (None, "2"):
+            params: Dict[str, str] = {
+                "target": "admrul",
+                "query": name,
+                "display": "50",
+                "page": "1",
+                "sort": "efdes",
+            }
+            if nw_val:
+                params["nw"] = nw_val
+
+            try:
+                root = _request_law_search(params)
+            except Exception:
+                continue
+
+            for elem in root.iter():
+                law_name = _get_child_text(elem, "행정규칙명") or _get_child_text(elem, "규칙명")
+                if not law_name:
+                    continue
+
+                rule_id = _get_child_text(elem, "행정규칙ID")
+                admrul_seq = _get_child_text(elem, "행정규칙일련번호")
+                prml_yd = _get_child_text(elem, "발령일자")
+                ef_yd = _get_child_text(elem, "시행일자")
+                detail_url = _get_child_text(elem, "본문상세링크") or _get_child_text(
+                    elem, "본문 상세링크"
+                )
+                if not admrul_seq:
+                    admrul_seq = _extract_admrul_seq(detail_url)
+
+                eff_date = _parse_yyyymmdd(ef_yd)
+                anc_date = _parse_yyyymmdd(prml_yd)
+
+                if eff_date == target_date:
+                    change_type = "시행"
+                elif anc_date == target_date:
+                    change_type = "공포"
+                else:
+                    continue
+
+                key_tuple = (law_name, admrul_seq)
+                if key_tuple in seen_keys:
+                    continue
+                seen_keys.add(key_tuple)
+
+                metas.append(
+                    LawChangeMeta(
+                        law_name=law_name,
+                        category="행정규칙",
+                        change_type=change_type,
+                        announcement_date=anc_date,
+                        effective_date=eff_date,
+                        source="law.go.kr:admrul(query)",
+                        detail_url=detail_url,
+                        law_id=rule_id,
+                        law_type="admrul",
+                        admrul_seq=admrul_seq,
+                    )
+                )
 
     return metas
 

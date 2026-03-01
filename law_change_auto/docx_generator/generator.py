@@ -256,32 +256,41 @@ def _detail_to_docx(
         date_str=target_date.strftime("%Y. %m."),
     )
 
-    # 1. 개정이유
+    # 1. 개정이유 / 1. 개정이유 및 주요내용
     reason_paras = _clean_revision_paras(detail.reason_sections or [])
     if not reason_paras and detail.combined_reason_and_main_sections:
         # 분리되지 않은 경우 combined를 사용
         reason_paras = _clean_revision_paras(detail.combined_reason_and_main_sections)
 
-    if reason_paras:
-        generator.add_section("1", "개정이유", reason_paras)
-    else:
-        generator.add_section("1", "개정이유", _fallback_reason_message(meta))
-
-    # 2. 주요내용
     main_paras = _clean_revision_paras(detail.main_change_sections or [])
-    generator.add_section("2", "주요내용")
+
+    # 개정이유·주요내용이 합쳐진 데이터인 경우(주요내용 별도 없음): "1. 개정이유 및 주요내용"으로 단일 섹션
+    # 주요내용이 분리된 경우: "1. 개정이유", "2. 주요내용" 유지
     if main_paras:
+        # 개정이유와 주요내용이 별도로 있는 경우
+        if reason_paras:
+            generator.add_section("1", "개정이유", reason_paras)
+        else:
+            generator.add_section("1", "개정이유", _fallback_reason_message(meta))
+        generator.add_section("2", "주요내용")
         generator.add_main_contents(paragraphs=main_paras)
+        impact_num = "3"
+        table_num = "4"
     else:
-        # 주요내용이 명시적으로 분리되지 않은 경우 기본 안내
-        generator.add_main_contents(paragraphs=["상기 개정이유 및 원문을 참조하시기 바랍니다."])
+        # 주요내용이 없고 개정이유만 있거나 합쳐진 경우
+        if reason_paras:
+            generator.add_section("1", "개정이유 및 주요내용", reason_paras)
+        else:
+            generator.add_section("1", "개정이유 및 주요내용", _fallback_reason_message(meta))
+        impact_num = "2"
+        table_num = "3"
 
-    # 3. 파급효과
+    # 파급효과
     impact_text = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
-    generator.add_section("3", "파급효과", impact_text, is_bold=True)
+    generator.add_section(impact_num, "파급효과", impact_text, is_bold=True)
 
-    # 4. 신구조문 대비표 (ins=빨간색, del=빨간색+밑줄)
-    generator.add_section("4", "신구조문 대비표")
+    # 신구조문 대비표 (ins=빨간색, del=빨간색+밑줄)
+    generator.add_section(table_num, "신구조문 대비표")
     comparison_table: List[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]] = []
     for row in detail.article_comparisons:
         old_seg = row.old_segments or [((row.old_text or "").strip(), "normal")]

@@ -42,17 +42,24 @@ def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
 
 
 def _parse_admrul_revision(soup: BeautifulSoup) -> list[str]:
-    """행정규칙 admRulInfoP?urlMode=admRulRvsInfoR 파싱.
+    """행정규칙 admRulRvsInfoR.do 파싱.
 
-    rvsBot/rvsTop 없이 rvsConScroll 내에 제정·개정이유가 위치.
+    rvsConScroll 또는 contentBody 내에 【제정·개정이유】 이후 본문이 위치.
+    pgroup 등 블록 구조는 get_text 후 헤더 이후 라인으로 추출.
     """
-    scroll_div = soup.find(id="rvsConScroll")
-    if scroll_div:
-        return _extract_texts_from_container(scroll_div)
-
     content_body = soup.find(id="contentBody")
     if content_body:
-        return _extract_after_header(content_body, "제정·개정이유")
+        results = _extract_after_header(content_body, "제정·개정이유")
+        if results:
+            return results
+
+    scroll_div = soup.find(id="rvsConScroll")
+    if scroll_div:
+        results = _extract_after_header(scroll_div, "제정·개정이유")
+        if results:
+            return results
+        # fallback: 말단 요소별 수집
+        return _extract_texts_from_container(scroll_div)
 
     return []
 

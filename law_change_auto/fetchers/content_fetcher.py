@@ -103,9 +103,10 @@ def fetch_revision_html(meta: LawChangeMeta) -> str | None:
     if meta.law_type == "ls" and meta.lsi_seq:
         url = f"https://www.law.go.kr/lsInfoP.do?lsiSeq={meta.lsi_seq}&viewCls=lsRvsDocInfoR"
     elif meta.law_type == "admrul" and meta.admrul_seq:
+        # admRulRvsInfoR.do: 개정이유 본문만 반환 (rvsConScroll/contentBody 포함)
         url = (
-            "https://www.law.go.kr/admRulInfoP.do"
-            f"?admRulSeq={meta.admrul_seq}&urlMode=admRulRvsInfoR"
+            "https://www.law.go.kr/LSW/admRulRvsInfoR.do"
+            f"?admRulSeq={meta.admrul_seq}"
         )
     else:
         return None

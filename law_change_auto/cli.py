@@ -9,6 +9,7 @@ from typing import List
 from .config.monitored_laws_loader import MonitoredLaw, load_monitored_laws
 from .docx_generator.generator import generate_guide
 from .fetchers.national_law_fetcher import (
+    get_admin_rule_changes_for_monitored,
     get_law_changes_for_monitored,
     get_recent_admin_rule_changes,
 )
@@ -91,9 +92,18 @@ def _process_single_date(
 
     try:
         law_metas = get_law_changes_for_monitored(monitored_laws, target_date)
-        admin_rule_metas = get_recent_admin_rule_changes(target_date)
+        admin_from_range = get_recent_admin_rule_changes(target_date)
+        admin_from_monitored = get_admin_rule_changes_for_monitored(monitored_laws, target_date)
+        # 발령/시행일자 기준 + 모니터링별 조회 결과 병합 (중복 제거)
+        seen = {(m.law_name, m.admrul_seq) for m in admin_from_range}
+        admin_rule_metas = list(admin_from_range)
+        for m in admin_from_monitored:
+            if (m.law_name, m.admrul_seq) not in seen:
+                seen.add((m.law_name, m.admrul_seq))
+                admin_rule_metas.append(m)
     except Exception as e:
         print(f"[law_change_auto] 경고: Open API 호출 중 오류 발생: {e}")
+        admin_rule_metas = []
 
     all_metas: List[LawChangeMeta] = [*law_metas, *admin_rule_metas]
     matches: List[MatchResult] = match_laws(monitored_laws, all_metas, threshold=0.8)
