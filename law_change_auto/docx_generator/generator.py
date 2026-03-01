@@ -11,12 +11,12 @@ _REVISION_PREFIXES = re.compile(
 )
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_UNDERLINE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Mm, Pt
+from docx.shared import Inches, Mm, Pt, RGBColor
 
-from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta
+from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta, TextSegment
 
 LINE_SPACING_BODY = 1.5
 LINE_SPACING_TITLE = 1.0
@@ -152,7 +152,11 @@ class DocxGenerator:
             self.doc.add_paragraph()
             self.doc.add_paragraph()
 
-    def add_comparison_table(self, comparison_data: List[Tuple[str, str]]) -> None:
+    def add_comparison_table(
+        self,
+        comparison_data: List[Tuple[List[TextSegment], List[TextSegment]]],
+    ) -> None:
+        """신구조문 대비표 추가. 세그먼트별 ins=빨간색, del=빨간색+밑줄 적용."""
         if not comparison_data:
             return
         table = self.doc.add_table(rows=1, cols=2)
@@ -167,15 +171,26 @@ class DocxGenerator:
             cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             self._set_cell_background(cell, "D9D9D9")
 
-        for old_text, new_text in comparison_data:
+        RED = RGBColor(255, 0, 0)
+
+        def _add_segments_to_cell(cell, segments: List[TextSegment]) -> None:
+            p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+            for r in list(p.runs):
+                r._element.getparent().remove(r._element)
+            for text, style in segments:
+                run = p.add_run(text)
+                run.font.size = Pt(9)
+                if style == "ins":
+                    run.font.color.rgb = RED
+                elif style == "del":
+                    run.font.color.rgb = RED
+                    run.font.underline = WD_UNDERLINE.SINGLE
+            p.paragraph_format.line_spacing = LINE_SPACING_BODY
+
+        for old_segments, new_segments in comparison_data:
             row_cells = table.add_row().cells
-            row_cells[0].text = (old_text or "").strip()
-            row_cells[1].text = (new_text or "").strip()
-            for cell in row_cells:
-                for paragraph in cell.paragraphs:
-                    paragraph.paragraph_format.line_spacing = LINE_SPACING_BODY
-                    for run in paragraph.runs:
-                        run.font.size = Pt(9)
+            _add_segments_to_cell(row_cells[0], old_segments)
+            _add_segments_to_cell(row_cells[1], new_segments)
         self.doc.add_paragraph()
 
     def _set_cell_background(self, cell, color: str) -> None:
@@ -265,12 +280,13 @@ def _detail_to_docx(
     impact_text = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
     generator.add_section("3", "파급효과", impact_text, is_bold=True)
 
-    # 4. 신구조문 대비표
+    # 4. 신구조문 대비표 (ins=빨간색, del=빨간색+밑줄)
     generator.add_section("4", "신구조문 대비표")
-    comparison_table: List[Tuple[str, str]] = [
-        ((row.old_text or "").strip(), (row.new_text or "").strip())
-        for row in detail.article_comparisons
-    ]
+    comparison_table: List[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]] = []
+    for row in detail.article_comparisons:
+        old_seg = row.old_segments or [((row.old_text or "").strip(), "normal")]
+        new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
+        comparison_table.append((old_seg, new_seg))
     generator.add_comparison_table(comparison_table)
 
 

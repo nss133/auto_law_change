@@ -31,6 +31,10 @@ class LawChangeMeta:
     admrul_seq: str | None = None    # 행정규칙 일련번호 (admRulLsInfoP, admrulOldAndNew용)
 
 
+# (text, style): style은 "normal" | "ins" | "del"
+TextSegment = tuple[str, str]
+
+
 @dataclass
 class ArticleComparisonRow:
     """신·구조문 대비표 한 행."""
@@ -39,6 +43,9 @@ class ArticleComparisonRow:
     article_title: str | None
     old_text: str | None
     new_text: str | None
+    # ins/del 마크업 보존 시 사용 (색상·밑줄 적용용)
+    old_segments: list[TextSegment] | None = None
+    new_segments: list[TextSegment] | None = None
 
 
 @dataclass
