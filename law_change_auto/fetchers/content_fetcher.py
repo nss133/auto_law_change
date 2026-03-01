@@ -49,12 +49,7 @@ def _extract_reason_from_eflaw_response(resp_text: str) -> tuple[str, dict | Non
             }
         return reason_text, metadata
     except Exception as e:
-        logger.warning(
-            "eflaw 응답 파싱 실패 (응답길이=%d): %s",
-            len(resp_text) if resp_text else 0,
-            e,
-            exc_info=True,
-        )
+        logger.debug("eflaw 응답 파싱 실패 (응답길이=%d): %s", len(resp_text) if resp_text else 0, e)
         return "", None
 
 
@@ -85,18 +80,18 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
             resp.encoding = "utf-8"
             return _extract_reason_from_eflaw_response(resp.text)
         except Exception as e:
-            logger.warning("eflaw API 호출 실패: %s", e, exc_info=True)
+            logger.debug("eflaw API 호출 실패: %s", e)
             return "", None
 
     url_id = (
-        f"http://www.law.go.kr/DRF/lawService.do"
+        f"https://www.law.go.kr/DRF/lawService.do"
         f"?OC={oc}&target=eflaw&ID={ls_id}&efYd={ef_yd}&chrClsCd={chr_cls_cd}&type=XML"
     )
     reason_text, metadata = _fetch(url_id)
 
     if not reason_text and lsi_seq:
         url_mst = (
-            f"http://www.law.go.kr/DRF/lawService.do"
+            f"https://www.law.go.kr/DRF/lawService.do"
             f"?OC={oc}&target=eflaw&MST={lsi_seq}&efYd={ef_yd}&chrClsCd={chr_cls_cd}&type=XML"
         )
         reason_text, metadata = _fetch(url_mst)
@@ -128,12 +123,12 @@ def fetch_old_new_html(meta: LawChangeMeta) -> str | None:
     oc = _get_oc()
     if meta.law_type == "ls" and meta.lsi_seq:
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
+            "https://www.law.go.kr/DRF/lawService.do"
             f"?OC={oc}&target=oldAndNew&MST={meta.lsi_seq}&type=XML"
         )
     elif meta.law_type == "admrul" and meta.admrul_seq:
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
+            "https://www.law.go.kr/DRF/lawService.do"
             f"?OC={oc}&target=admrulOldAndNew&ID={meta.admrul_seq}&type=XML"
         )
     else:
