@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 from dotenv import load_dotenv
 
@@ -417,6 +418,32 @@ def _collect_legislation_details(
     return details
 
 
+def _filename_for_detail(detail: LawChangeDetail, used: Set[str], max_base_len: int = 50) -> str:
+    """법령 제목 기반 파일명 생성. 예: '보험업법 시행령 시행 안내.docx'"""
+    meta = detail.meta
+    if meta.category == "행정규칙":
+        suffix = "고시 규정변경예고 안내"
+    elif meta.category == "입법예고":
+        suffix = "고시 규정변경예고 안내" if meta.change_type == "규정변경예고" else "입법예고 안내"
+    else:
+        suffix = "시행 안내"
+
+    base = (meta.law_name or "법령").strip()
+    base = re.sub(r"[\"*/:<>?\\|]", "_", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    if len(base) > max_base_len:
+        base = base[: max_base_len - 2].rstrip() + "…"
+    name = f"{base} {suffix}.docx"
+    if name in used:
+        for i in range(2, 100):
+            candidate = f"{base} {suffix}_{i}.docx"
+            if candidate not in used:
+                name = candidate
+                break
+    used.add(name)
+    return name
+
+
 def _process_comprehensive_period(
     output_dir: Path,
     monitored_laws: List[MonitoredLaw],
@@ -438,10 +465,11 @@ def _process_comprehensive_period(
         print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
         return []
 
-    prefix = f"law_change_guide_{date_from.strftime('%Y%m%d')}_{date_to.strftime('%Y%m%d')}"
+    used_names: Set[str] = set()
     created: List[Path] = []
-    for i, detail in enumerate(all_details):
-        output_file = output_dir / f"{prefix}_{i + 1:03d}.docx"
+    for detail in all_details:
+        filename = _filename_for_detail(detail, used_names)
+        output_file = output_dir / filename
         generate_guide([detail], date_to, output_file)
         created.append(output_file)
     return created
