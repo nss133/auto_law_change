@@ -9,8 +9,8 @@ from typing import List, Set, Tuple
 
 from dotenv import load_dotenv
 
-# 프로젝트 루트의 .env에서 LAW_GO_API_KEY 등 로드
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+# 프로젝트 루트의 .env에서 LAW_GO_API_KEY, GEMINI_API_KEY 등 로드
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from .config.monitored_laws_loader import MonitoredLaw, load_monitored_laws
 from .docx_generator.generator import generate_guide
@@ -80,6 +80,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--legislation",
         action="store_true",
         help="입법예고/규정변경예고 모드. 금융위원회 FSC 목록에서 매칭 건의 PDF 첨부를 추출해 안내서 생성.",
+    )
+    parser.add_argument(
+        "--no-perplexity",
+        action="store_true",
+        help="파급효과를 Perplexity API로 생성하지 않고 기본 문구만 사용 (비용 절감용).",
     )
     return parser.parse_args(argv)
 
@@ -253,6 +258,7 @@ def _process_single_date(
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
     create_example_if_empty: bool = True,
+    use_perplexity: bool = True,
 ) -> Path | None:
     """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. 생성된 파일 경로를 반환하고, 건이 없으면 None."""
     details = _collect_details_for_date(target_date, monitored_laws, law_filter)
@@ -277,7 +283,7 @@ def _process_single_date(
             return None
 
     output_file = output_dir / f"law_change_guide_{target_date.strftime('%Y%m%d')}.docx"
-    generate_guide(details, target_date, output_file)
+    generate_guide(details, target_date, output_file, use_perplexity=use_perplexity)
     return output_file
 
 
@@ -286,6 +292,7 @@ def _process_legislation(
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
     max_items: int = 30,
+    use_perplexity: bool = True,
 ) -> Path | None:
     """입법예고/규정변경예고 (FSC) 조회·PDF 추출·안내서 생성."""
     try:
@@ -348,7 +355,7 @@ def _process_legislation(
     target_date = dt.date.today()
     notice_id = details[0].meta.law_id or "legislation"
     output_file = output_dir / f"law_change_guide_legislation_{notice_id}.docx"
-    generate_guide(details, target_date, output_file)
+    generate_guide(details, target_date, output_file, use_perplexity=use_perplexity)
     return output_file
 
 
@@ -450,6 +457,7 @@ def _process_comprehensive_period(
     law_filter: str,
     date_from: dt.date,
     date_to: dt.date,
+    use_perplexity: bool = True,
 ) -> List[Path]:
     """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성. (기간 API + 병렬로 단축)"""
     all_details: List[LawChangeDetail] = _collect_details_for_range(
@@ -470,7 +478,7 @@ def _process_comprehensive_period(
     for detail in all_details:
         filename = _filename_for_detail(detail, used_names)
         output_file = output_dir / filename
-        generate_guide([detail], date_to, output_file)
+        generate_guide([detail], date_to, output_file, use_perplexity=use_perplexity)
         created.append(output_file)
     return created
 
@@ -490,9 +498,11 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] dry-run 모드이므로 DOCX를 생성하지 않습니다.")
         return
 
+    use_perplexity = not args.no_perplexity
+
     if args.legislation:
         print("[law_change_auto] 입법예고/규정변경예고 모드")
-        result = _process_legislation(output_dir, monitored_laws, law_filter)
+        result = _process_legislation(output_dir, monitored_laws, law_filter, use_perplexity=use_perplexity)
         if result:
             print(f"[law_change_auto] 안내서 생성 완료: {result.resolve()}")
         else:
@@ -514,7 +524,7 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] 법령·시행령·행정규칙·입법예고 건별 안내서 생성 중...")
 
         created = _process_comprehensive_period(
-            output_dir, monitored_laws, law_filter, date_from, date_to
+            output_dir, monitored_laws, law_filter, date_from, date_to, use_perplexity=use_perplexity
         )
         if created:
             for path in created:
@@ -528,7 +538,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[law_change_auto] 기준일자: {target_date.isoformat()}")
 
         result = _process_single_date(
-            target_date, output_dir, monitored_laws, law_filter, create_example_if_empty=True
+            target_date, output_dir, monitored_laws, law_filter,
+            create_example_if_empty=True, use_perplexity=use_perplexity,
         )
         if result:
             print(f"[law_change_auto] 안내서 생성 완료: {result.resolve()}")

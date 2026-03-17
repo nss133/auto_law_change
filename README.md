@@ -26,6 +26,7 @@ pip install -r requirements.txt
 ### 환경변수
 
 - `LAW_GO_API_KEY`: 국가법령정보센터 API OC(이메일 ID). [open.law.go.kr](https://open.law.go.kr)에서 발급.
+- `PERPLEXITY_API_KEY`: (선택) 파급효과 문구 생성용. [Perplexity API](https://docs.perplexity.ai)에서 발급. 없으면 기본 문구 사용.
 
 ### CLI
 
@@ -47,6 +48,7 @@ python -m law_change_auto.cli --legislation --law 자본시장
 
 - `--legislation`: 입법예고 모드
 - `--law`: 제목에 포함된 검색어 (예: 자본시장, 보험업)
+- `--no-perplexity`: 파급효과를 Perplexity로 생성하지 않고 기본 문구만 사용 (비용 절감)
 
 ### 특정 법령(lsiSeq) 기준 테스트
 

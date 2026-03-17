@@ -21,6 +21,8 @@ from docx.shared import Inches, Mm, Pt, RGBColor
 
 from ..fetchers.pdf_extractor import render_pdf_pages_to_images
 from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta, TextSegment
+from ..services.gemini_client import fetch_impact_text as fetch_impact_text_gemini
+from ..services.perplexity_client import fetch_impact_text as fetch_impact_text_perplexity
 
 LINE_SPACING_BODY = 1.5
 LINE_SPACING_TITLE = 1.0
@@ -277,7 +279,10 @@ def _fallback_reason_message(meta: LawChangeMeta) -> str:
 
 
 def _detail_to_docx(
-    detail: LawChangeDetail, target_date: date, generator: DocxGenerator
+    detail: LawChangeDetail,
+    target_date: date,
+    generator: DocxGenerator,
+    use_perplexity: bool = True,
 ) -> None:
     meta = detail.meta
     if meta.category == "행정규칙":
@@ -336,8 +341,15 @@ def _detail_to_docx(
         impact_num = "2"
         table_num = "3"
 
-    # 파급효과
-    impact_text = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
+    # 파급효과 (Gemini 우선 → Perplexity → 기본 문구)
+    fallback_impact = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
+    impact_text = fallback_impact
+    if use_perplexity:
+        impact_text = (
+            fetch_impact_text_gemini(meta.law_name, reason_paras, main_paras)
+            or fetch_impact_text_perplexity(meta.law_name, reason_paras, main_paras)
+            or fallback_impact
+        )
     generator.add_section(impact_num, "파급효과", impact_text, is_bold=True)
 
     # 신구조문 대비표
@@ -359,7 +371,10 @@ def _detail_to_docx(
 
 
 def generate_guide(
-    details: LawChangeDetailSeq, target_date: date, output_path: Path
+    details: LawChangeDetailSeq,
+    target_date: date,
+    output_path: Path,
+    use_perplexity: bool = True,
 ) -> Path:
     """LawChangeDetail를 DOCX로 변환한다. 여러 건이면 각 건마다 페이지로 구분하여 삽입."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +383,7 @@ def generate_guide(
         for i, detail in enumerate(details):
             if i > 0:
                 generator.add_page_break()
-            _detail_to_docx(detail, target_date, generator)
+            _detail_to_docx(detail, target_date, generator, use_perplexity)
     else:
         generator.add_title("법령제·개정 안내서")
         generator.add_metadata("", "", "", date_str=target_date.strftime("%y. %m."))
