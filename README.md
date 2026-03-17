@@ -26,7 +26,10 @@ pip install -r requirements.txt
 ### 환경변수
 
 - `LAW_GO_API_KEY`: 국가법령정보센터 API OC(이메일 ID). [open.law.go.kr](https://open.law.go.kr)에서 발급.
-- `PERPLEXITY_API_KEY`: (선택) 파급효과 문구 생성용. [Perplexity API](https://docs.perplexity.ai)에서 발급. 없으면 기본 문구 사용.
+- `GEMINI_API_KEY`: (권장) **파급효과** 문구 생성용. [Google AI Studio](https://aistudio.google.com/apikey)에서 발급. 없으면 Perplexity 또는 기본 문구 사용.
+- `PERPLEXITY_API_KEY`: (선택) 파급효과 문구 생성용 fallback. [Perplexity API](https://docs.perplexity.ai)에서 발급.
+
+파급효과 문단은 **Gemini → Perplexity → 기본 문구** 순으로 채워집니다. 생명보험회사 임직원 독자·-음/-임 문체로 생성됩니다.
 
 ### CLI
 
@@ -39,7 +42,8 @@ pip install -r requirements.txt
 
 ### 입법예고/규정변경예고 모드
 
-금융위원회(FSC) 입법예고·규정변경예고 목록에서 매칭 건의 PDF 첨부를 추출해 안내서를 생성합니다.
+금융위원회(FSC) 입법예고·규정변경예고 목록에서 매칭 건의 PDF 첨부를 추출해 안내서를 생성합니다.  
+신구조문 대비표는 **Gemini 비전 API**로 PDF 이미지에서 표를 추출해 DOCX에 삽입합니다. (`GEMINI_API_KEY` 사용)
 
 ```bash
 python -m law_change_auto.cli --legislation --law 자본시장
@@ -48,7 +52,7 @@ python -m law_change_auto.cli --legislation --law 자본시장
 
 - `--legislation`: 입법예고 모드
 - `--law`: 제목에 포함된 검색어 (예: 자본시장, 보험업)
-- `--no-perplexity`: 파급효과를 Perplexity로 생성하지 않고 기본 문구만 사용 (비용 절감)
+- `--no-perplexity`: 파급효과를 AI(Gemini/Perplexity)로 생성하지 않고 기본 문구만 사용 (비용 절감)
 
 ### 특정 법령(lsiSeq) 기준 테스트
 

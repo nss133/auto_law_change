@@ -35,6 +35,7 @@ from .matching.law_matcher import MatchResult, match_laws
 from .models import LawChangeDetail, LawChangeMeta
 from .parsers.law_change_parser import parse_law_change
 from .parsers.legislation_parser import parse_reason_main_from_notice_body
+from .services.gemini_table_extractor import extract_comparison_table_from_pdf_paths
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -330,12 +331,19 @@ def _process_legislation(
             body_text = ""
         reason_sections, main_sections, opinion_deadline = parse_reason_main_from_notice_body(body_text)
 
-        # 신구조문 대비표: 규정 고시안 PDF만 다운로드·저장 (대비표 내용은 안내서에 비움)
+        # 신구조문 대비표: 규정 고시안 PDF 다운로드·저장 후 Gemini 비전으로 표 추출
         try:
             comparison_pdfs = download_and_save_gosi_pdfs(detail_url, output_dir)
         except Exception as e:
             print(f"[law_change_auto] 첨부 PDF 저장 실패 ({meta.law_name[:30]}...): {e}")
             comparison_pdfs = []
+
+        article_comparisons = []
+        if comparison_pdfs:
+            try:
+                article_comparisons = extract_comparison_table_from_pdf_paths(comparison_pdfs)
+            except Exception as e:
+                print(f"[law_change_auto] PDF 대비표 추출 실패 (Gemini): {e}")
 
         combined = reason_sections + main_sections
         detail = LawChangeDetail(
@@ -343,7 +351,7 @@ def _process_legislation(
             reason_sections=reason_sections,
             main_change_sections=main_sections,
             combined_reason_and_main_sections=combined,
-            article_comparisons=[],
+            article_comparisons=article_comparisons,
             opinion_deadline=opinion_deadline,
             comparison_pdf_paths=comparison_pdfs,
         )
@@ -410,13 +418,20 @@ def _collect_legislation_details(
             print(f"[law_change_auto] 첨부 PDF 저장 실패 ({meta.law_name[:30]}...): {e}")
             comparison_pdfs = []
 
+        article_comparisons = []
+        if comparison_pdfs:
+            try:
+                article_comparisons = extract_comparison_table_from_pdf_paths(comparison_pdfs)
+            except Exception as e:
+                print(f"[law_change_auto] PDF 대비표 추출 실패 (Gemini): {e}")
+
         combined = reason_sections + main_sections
         detail = LawChangeDetail(
             meta=meta,
             reason_sections=reason_sections,
             main_change_sections=main_sections,
             combined_reason_and_main_sections=combined,
-            article_comparisons=[],
+            article_comparisons=article_comparisons,
             opinion_deadline=opinion_deadline,
             comparison_pdf_paths=comparison_pdfs,
         )

@@ -354,15 +354,22 @@ def _detail_to_docx(
 
     # 신구조문 대비표
     generator.add_section(table_num, "신구조문 대비표")
-    # 입법예고: 첨부 원문 파일 안내만, 대비표 내용은 비움 (PDF는 output 폴더에 저장됨)
+    # 입법예고: Gemini로 추출한 대비표가 있으면 표 삽입, 이후 첨부 원문 안내
     if meta.category == "입법예고" and detail.comparison_pdf_paths:
+        if detail.article_comparisons:
+            comparison_table: List[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]] = []
+            for row in detail.article_comparisons:
+                old_seg = row.old_segments or [((row.old_text or "").strip(), "normal")]
+                new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
+                comparison_table.append((old_seg, new_seg))
+            generator.add_comparison_table(comparison_table)
         for label, saved_path in detail.comparison_pdf_paths:
             fname = Path(saved_path).name if saved_path else label
             content = f"※ 첨부 원문: {fname} (본 안내서와 동일 폴더에 저장됨)"
             generator.add_main_contents(paragraphs=[content])
     # 법령·행정규칙: 파싱된 표 삽입
     elif detail.article_comparisons:
-        comparison_table: List[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]] = []
+        comparison_table = []
         for row in detail.article_comparisons:
             old_seg = row.old_segments or [((row.old_text or "").strip(), "normal")]
             new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
