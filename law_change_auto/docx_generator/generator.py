@@ -354,15 +354,8 @@ def _detail_to_docx(
 
     # 신구조문 대비표
     generator.add_section(table_num, "신구조문 대비표")
-    # 입법예고: Gemini로 추출한 대비표가 있으면 표 삽입, 이후 첨부 원문 안내
+    # 입법예고: 첨부 원문 파일 안내만, 대비표 내용은 비움 (PDF는 output 폴더에 저장됨)
     if meta.category == "입법예고" and detail.comparison_pdf_paths:
-        if detail.article_comparisons:
-            comparison_table: List[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]] = []
-            for row in detail.article_comparisons:
-                old_seg = row.old_segments or [((row.old_text or "").strip(), "normal")]
-                new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
-                comparison_table.append((old_seg, new_seg))
-            generator.add_comparison_table(comparison_table)
         for label, saved_path in detail.comparison_pdf_paths:
             fname = Path(saved_path).name if saved_path else label
             content = f"※ 첨부 원문: {fname} (본 안내서와 동일 폴더에 저장됨)"
@@ -375,6 +368,47 @@ def _detail_to_docx(
             new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
             comparison_table.append((old_seg, new_seg))
         generator.add_comparison_table(comparison_table)
+
+
+def guide_display_title(meta: LawChangeMeta) -> str:
+    """안내서 제목 문자열(파일명과 동일한 접미어, 법령명은 잘리지 않음). 목차용."""
+    if meta.category == "행정규칙":
+        suffix = "고시 규정변경예고 안내"
+    elif meta.category == "입법예고":
+        suffix = "고시 규정변경예고 안내" if meta.change_type == "규정변경예고" else "입법예고 안내"
+    else:
+        suffix = "시행 안내"
+    return f"{(meta.law_name or '법령').strip()} {suffix}"
+
+
+def write_period_toc_docx(
+    output_path: Path,
+    period_line: str,
+    numbered_lines: List[str],
+) -> Path:
+    """종합 기간 모드 산출물 폴더용 목차 docx."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    p0 = doc.add_paragraph()
+    r0 = p0.add_run("법령제·개정 안내서 목차")
+    r0.bold = True
+    r0.font.size = Pt(14)
+    p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p0.paragraph_format.space_after = PARAGRAPH_SPACING_AFTER
+
+    p1 = doc.add_paragraph()
+    p1.add_run(period_line)
+    p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _apply_body_format(p1)
+
+    doc.add_paragraph()
+    for line in numbered_lines:
+        p = doc.add_paragraph()
+        p.add_run(line)
+        _apply_body_format(p)
+
+    doc.save(str(output_path))
+    return output_path
 
 
 def generate_guide(

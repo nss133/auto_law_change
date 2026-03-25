@@ -42,8 +42,7 @@ pip install -r requirements.txt
 
 ### 입법예고/규정변경예고 모드
 
-금융위원회(FSC) 입법예고·규정변경예고 목록에서 매칭 건의 PDF 첨부를 추출해 안내서를 생성합니다.  
-신구조문 대비표는 **Gemini 비전 API**로 PDF 이미지에서 표를 추출해 DOCX에 삽입합니다. (`GEMINI_API_KEY` 사용)
+금융위원회(FSC) 입법예고·규정변경예고 목록에서 매칭 건의 PDF 첨부를 추출해 안내서를 생성합니다.
 
 ```bash
 python -m law_change_auto.cli --legislation --law 자본시장

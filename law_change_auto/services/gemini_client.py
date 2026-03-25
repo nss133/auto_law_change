@@ -92,7 +92,6 @@ def fetch_impact_text(
         parts = (candidates[0].get("content") or {}).get("parts") or []
         if not parts:
             return None
-        # Gemini 2.5는 thinking 사용 시 parts가 여러 개(thought + 본문). 본문만 모두 이어붙임.
         texts = []
         for part in parts:
             if part.get("thought") is True:
@@ -101,7 +100,6 @@ def fetch_impact_text(
             if t:
                 texts.append(t)
         text = " ".join(texts).strip() if texts else ""
-        # 제목/번호 제거 (예: "## 파급효과", "3. 파급효과" 등)
         for prefix in ("## 파급효과", "##파급효과", "파급효과\n", "파급효과 "):
             if text.startswith(prefix):
                 text = text[len(prefix) :].strip()

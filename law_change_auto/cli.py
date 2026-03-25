@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from .config.monitored_laws_loader import MonitoredLaw, load_monitored_laws
-from .docx_generator.generator import generate_guide
+from .docx_generator.generator import generate_guide, guide_display_title, write_period_toc_docx
 from .fetchers.legislation_fetcher import (
     download_and_save_gosi_pdfs,
     fetch_fsc_legislation_list,
@@ -35,7 +35,6 @@ from .matching.law_matcher import MatchResult, match_laws
 from .models import LawChangeDetail, LawChangeMeta
 from .parsers.law_change_parser import parse_law_change
 from .parsers.legislation_parser import parse_reason_main_from_notice_body
-from .services.gemini_table_extractor import extract_comparison_table_from_pdf_paths
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -331,19 +330,12 @@ def _process_legislation(
             body_text = ""
         reason_sections, main_sections, opinion_deadline = parse_reason_main_from_notice_body(body_text)
 
-        # 신구조문 대비표: 규정 고시안 PDF 다운로드·저장 후 Gemini 비전으로 표 추출
+        # 신구조문 대비표: 규정 고시안 PDF만 다운로드·저장 (대비표 내용은 안내서에 비움)
         try:
             comparison_pdfs = download_and_save_gosi_pdfs(detail_url, output_dir)
         except Exception as e:
             print(f"[law_change_auto] 첨부 PDF 저장 실패 ({meta.law_name[:30]}...): {e}")
             comparison_pdfs = []
-
-        article_comparisons = []
-        if comparison_pdfs:
-            try:
-                article_comparisons = extract_comparison_table_from_pdf_paths(comparison_pdfs)
-            except Exception as e:
-                print(f"[law_change_auto] PDF 대비표 추출 실패 (Gemini): {e}")
 
         combined = reason_sections + main_sections
         detail = LawChangeDetail(
@@ -351,7 +343,7 @@ def _process_legislation(
             reason_sections=reason_sections,
             main_change_sections=main_sections,
             combined_reason_and_main_sections=combined,
-            article_comparisons=article_comparisons,
+            article_comparisons=[],
             opinion_deadline=opinion_deadline,
             comparison_pdf_paths=comparison_pdfs,
         )
@@ -418,20 +410,13 @@ def _collect_legislation_details(
             print(f"[law_change_auto] 첨부 PDF 저장 실패 ({meta.law_name[:30]}...): {e}")
             comparison_pdfs = []
 
-        article_comparisons = []
-        if comparison_pdfs:
-            try:
-                article_comparisons = extract_comparison_table_from_pdf_paths(comparison_pdfs)
-            except Exception as e:
-                print(f"[law_change_auto] PDF 대비표 추출 실패 (Gemini): {e}")
-
         combined = reason_sections + main_sections
         detail = LawChangeDetail(
             meta=meta,
             reason_sections=reason_sections,
             main_change_sections=main_sections,
             combined_reason_and_main_sections=combined,
-            article_comparisons=article_comparisons,
+            article_comparisons=[],
             opinion_deadline=opinion_deadline,
             comparison_pdf_paths=comparison_pdfs,
         )
@@ -466,6 +451,36 @@ def _filename_for_detail(detail: LawChangeDetail, used: Set[str], max_base_len: 
     return name
 
 
+def _detail_sort_date_for_toc(detail: LawChangeDetail, fallback: dt.date) -> dt.date:
+    """목차·정렬용 기준일: 예고일·공포 등 announcement_date 우선, 없으면 시행일, 없으면 기간 종료일."""
+    m = detail.meta
+    return m.announcement_date or m.effective_date or fallback
+
+
+def _sort_details_for_period_toc(details: List[LawChangeDetail], fallback_date: dt.date) -> List[LawChangeDetail]:
+    """날짜 오름차순, 같은 날은 법령명 가나다순(가능하면 로캘 strxfrm)."""
+    import locale
+
+    try:
+        locale.setlocale(locale.LC_COLLATE, "ko_KR.UTF-8")
+    except Exception:
+        try:
+            locale.setlocale(locale.LC_COLLATE, "Korean_Korea.UTF-8")
+        except Exception:
+            pass
+
+    def _name_key(name: str) -> str:
+        try:
+            return locale.strxfrm(name or "")
+        except Exception:
+            return name or ""
+
+    return sorted(
+        details,
+        key=lambda d: (_detail_sort_date_for_toc(d, fallback_date), _name_key(d.meta.law_name or "")),
+    )
+
+
 def _process_comprehensive_period(
     output_dir: Path,
     monitored_laws: List[MonitoredLaw],
@@ -488,13 +503,37 @@ def _process_comprehensive_period(
         print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
         return []
 
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sorted_details = _sort_details_for_period_toc(all_details, date_to)
     used_names: Set[str] = set()
     created: List[Path] = []
-    for detail in all_details:
+    toc_pairs: List[Tuple[LawChangeDetail, Path]] = []
+
+    for i, detail in enumerate(sorted_details, start=1):
         filename = _filename_for_detail(detail, used_names)
-        output_file = output_dir / filename
+        numbered_filename = f"{i}. {filename}"
+        output_file = output_dir / numbered_filename
         generate_guide([detail], date_to, output_file, use_perplexity=use_perplexity)
         created.append(output_file)
+        toc_pairs.append((detail, output_file))
+
+    period_line = (
+        f"{date_from.year}. {date_from.month}. {date_from.day}. "
+        f"~ {date_to.year}. {date_to.month}. {date_to.day}."
+    )
+    toc_lines: List[str] = []
+    for i, (detail, out_path) in enumerate(toc_pairs, start=1):
+        sd = _detail_sort_date_for_toc(detail, date_to)
+        date_fmt = f"{sd.year}. {sd.month}. {sd.day}."
+        title = guide_display_title(detail.meta)
+        toc_lines.append(f"{i}. {date_fmt} {title} ({out_path.name})")
+
+    toc_path = output_dir / "목차.docx"
+    write_period_toc_docx(toc_path, period_line, toc_lines)
+    created.insert(0, toc_path)
+
     return created
 
 

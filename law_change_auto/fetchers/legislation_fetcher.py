@@ -41,7 +41,7 @@ def download_and_save_gosi_pdfs(
         session.get(detail_url, timeout=20)
     pdfs = fetch_fsc_notice_pdf_urls(detail_url)
     result: List[tuple[str, str]] = []
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     for label, url in pdfs:
         if not _is_regulation_gosi_label(label):
@@ -58,8 +58,9 @@ def download_and_save_gosi_pdfs(
         try:
             path.write_bytes(data)
             result.append((label, str(path.resolve())))
-        except Exception:
-            pass
+            print(f"[law_change_auto] PDF 저장: {path}")
+        except Exception as e:
+            print(f"[law_change_auto] PDF 저장 실패 ({name}): {e}")
     return result
 
 FSC_LEGISLATION_LIST = "https://www.fsc.go.kr/po040301"
