@@ -8,33 +8,102 @@ import re
 from ..models import ArticleComparisonRow, LawChangeDetail, LawChangeMeta
 
 
-def _parse_revision_reason(html: str) -> list[str]:
-    """제·개정이유 영역(rvsBot~rvsTop 사이) 전체 텍스트를 한 덩어리로 반환."""
+# 개정이유 본문 앞의 불필요한 접두어 패턴
+_PREFIX_RE = re.compile(
+    r"^\s*(?:【제정·개정이유】|【제정ㆍ개정이유】)\s*"
+)
+_AMEND_TYPE_RE = re.compile(
+    r"^\s*\[(?:일부개정|전부개정|타법개정|제정)\]\s*"
+)
+
+
+def _extract_between_rvs(html: str) -> str:
+    """rvsBot~rvsTop 사이 텍스트를 개행 구분으로 추출."""
     soup = BeautifulSoup(html, "lxml")
-
     rvs_bot = soup.find(id="rvsBot")
-    rvs_top = soup.find(id="rvsTop")
     if not rvs_bot:
-        return []
+        return ""
 
-    between_parts: list[str] = []
+    parts: list[str] = []
     node = rvs_bot.find_next_sibling()
     while node:
         if getattr(node, "get", None) and node.get("id") == "rvsTop":
             break
         if hasattr(node, "get_text"):
-            txt = node.get_text(separator=" ", strip=True)
+            txt = node.get_text(separator="\n", strip=True)
             if txt:
-                between_parts.append(txt)
+                parts.append(txt)
         node = node.find_next_sibling()
 
-    full_text = " ".join(between_parts).strip()
-    if not full_text:
-        return []
+    return "\n".join(parts).strip()
 
-    # 공백 정리만 하고 그대로 사용
-    cleaned = re.sub(r"\s+", " ", full_text).strip()
-    return [cleaned] if cleaned else []
+
+def _split_reason_and_main(raw_text: str) -> tuple[str | None, str | None, bool]:
+    """개정이유 원문에서 '개정이유'와 '주요내용'을 분리한다.
+
+    Returns:
+        (reason_text, main_text, is_combined)
+        - is_combined=True: '개정이유 및 주요내용' 통합형 → reason_text에 전체, main_text=None
+        - is_combined=False: 분리형 → reason_text, main_text 각각
+    """
+    text = raw_text.strip()
+    # 접두어 제거
+    text = _PREFIX_RE.sub("", text).strip()
+    text = _AMEND_TYPE_RE.sub("", text).strip()
+
+    # 통합형: "◇ 개정이유 및 주요내용"
+    combined_pat = re.compile(r"◇\s*개정이유\s*및\s*주요내용\s*")
+    if combined_pat.search(text):
+        content = combined_pat.sub("", text).strip()
+        return content, None, True
+
+    # 분리형: "◇ 개정이유" ... "◇ 주요내용"
+    reason_pat = re.compile(r"◇\s*개정이유\s*")
+    main_pat = re.compile(r"◇\s*주요내용\s*")
+
+    reason_match = reason_pat.search(text)
+    main_match = main_pat.search(text)
+
+    if reason_match and main_match:
+        reason_start = reason_match.end()
+        main_start = main_match.start()
+        main_content_start = main_match.end()
+        reason_text = text[reason_start:main_start].strip()
+        main_text = text[main_content_start:].strip()
+        return reason_text, main_text, False
+
+    # ◇ 마커 없이 내용만 있는 경우 → 통합형으로 처리
+    if text:
+        return text, None, True
+
+    return None, None, True
+
+
+def _parse_revision_from_html(html: str) -> tuple[str | None, str | None, bool]:
+    """lsRvsDocInfoR HTML에서 개정이유/주요내용을 파싱."""
+    raw = _extract_between_rvs(html)
+    if not raw:
+        # 행정규칙: rvsBot 없음 → div.pgroup 에서 개정문 추출
+        raw = _extract_admrul_revision(html)
+    if not raw:
+        return None, None, True
+    return _split_reason_and_main(raw)
+
+
+def _extract_admrul_revision(html: str) -> str:
+    """행정규칙 개정문(div.pgroup)에서 텍스트 추출."""
+    soup = BeautifulSoup(html, "lxml")
+    pgroup = soup.find("div", class_="pgroup")
+    if not pgroup:
+        return ""
+    return pgroup.get_text(separator="\n", strip=True)
+
+
+def _parse_revision_from_text(text: str) -> tuple[str | None, str | None, bool]:
+    """lsRvsRsnListP에서 가져온 텍스트를 파싱."""
+    if not text or not text.strip():
+        return None, None, True
+    return _split_reason_and_main(text)
 
 
 def _clean_markup(text: str) -> str:
@@ -115,19 +184,31 @@ def parse_law_change(
 ) -> LawChangeDetail:
     """제·개정이유/신·구조문 대비표 HTML을 각각 받아 LawChangeDetail로 변환.
 
-    revision_text_from_list가 있으면 lsRvsRsnListP.do에서 추출한 개정이유로 사용하고,
-    없을 때만 revision_html을 파싱한다.
+    개정이유/주요내용 분리 로직:
+      - '◇ 개정이유 및 주요내용' → combined_reason_and_main_sections (통합형)
+      - '◇ 개정이유' + '◇ 주요내용' → reason_sections + main_change_sections (분리형)
     """
     detail = LawChangeDetail(meta=meta)
 
+    reason_text: str | None = None
+    main_text: str | None = None
+    is_combined = True
+
     if revision_text_from_list:
-        detail.combined_reason_and_main_sections.append(revision_text_from_list)
+        reason_text, main_text, is_combined = _parse_revision_from_text(revision_text_from_list)
     elif revision_html:
-        combined = _parse_revision_reason(revision_html)
-        detail.combined_reason_and_main_sections.extend(combined)
+        reason_text, main_text, is_combined = _parse_revision_from_html(revision_html)
+
+    if is_combined:
+        if reason_text:
+            detail.combined_reason_and_main_sections.append(reason_text)
+    else:
+        if reason_text:
+            detail.reason_sections.append(reason_text)
+        if main_text:
+            detail.main_change_sections.append(main_text)
 
     if old_new_html:
         detail.article_comparisons.extend(_parse_old_new_table(old_new_html))
 
     return detail
-
