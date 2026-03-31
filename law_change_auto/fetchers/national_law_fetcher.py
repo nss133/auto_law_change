@@ -87,6 +87,25 @@ def _extract_admrul_seq(detail_url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _normalize_gazette_number(raw: str | None) -> str | None:
+    """공포번호 표시용 (예: 00007 → 7)."""
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return str(int(s))
+    return s
+
+
+def _ls_stmd_act_and_promulgation(elem: ET.Element) -> tuple[str | None, str | None]:
+    """lsStmd 행에서 법령구분명·공포번호."""
+    kind = _get_child_text(elem, "법령구분명")
+    raw_no = _get_child_text(elem, "공포번호")
+    return (kind, _normalize_gazette_number(raw_no))
+
+
 def get_recent_law_changes(target_date: date) -> List[LawChangeMeta]:
     """지정 일자 기준 법령(법률·대통령령·부령) 변경 목록을 조회한다.
 
@@ -136,6 +155,7 @@ def get_recent_law_changes(target_date: date) -> List[LawChangeMeta]:
                 continue
             seen_keys.add(key_tuple)
 
+            act_name, promo_no = _ls_stmd_act_and_promulgation(elem)
             metas.append(
                 LawChangeMeta(
                     law_name=law_name,
@@ -149,6 +169,8 @@ def get_recent_law_changes(target_date: date) -> List[LawChangeMeta]:
                     chr_cls_cd=chr_cls_cd,
                     law_type="ls",
                     lsi_seq=lsi_seq,
+                    act_type_name=act_name,
+                    promulgation_no=promo_no,
                 )
             )
 
@@ -216,6 +238,7 @@ def get_law_changes_for_monitored(
             else:
                 continue
 
+            act_name, promo_no = _ls_stmd_act_and_promulgation(elem)
             metas.append(
                 LawChangeMeta(
                     law_name=law_name,
@@ -229,6 +252,8 @@ def get_law_changes_for_monitored(
                     chr_cls_cd=chr_cls_cd,
                     law_type="ls",
                     lsi_seq=lsi_seq,
+                    act_type_name=act_name,
+                    promulgation_no=promo_no,
                 )
             )
 
@@ -305,6 +330,7 @@ def get_recent_law_changes_range(
             seen_keys.add(key_tuple)
             eff_date = _parse_yyyymmdd(ef_yd)
             anc_date = _parse_yyyymmdd(anc_yd)
+            act_name, promo_no = _ls_stmd_act_and_promulgation(elem)
             metas.append(
                 LawChangeMeta(
                     law_name=law_name,
@@ -318,6 +344,8 @@ def get_recent_law_changes_range(
                     chr_cls_cd=chr_cls_cd,
                     law_type="ls",
                     lsi_seq=lsi_seq,
+                    act_type_name=act_name,
+                    promulgation_no=promo_no,
                 )
             )
     return metas

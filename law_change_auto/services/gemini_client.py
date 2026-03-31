@@ -36,7 +36,7 @@ def fetch_impact_text(
 ) -> Optional[str]:
     """
     법령명·개정이유·주요내용을 입력으로 Gemini API에 파급효과 문구를 요청.
-    성공 시 파급효과 텍스트 반환, 실패·빈 응답 시 None.
+    성공 시 파급효과 텍스트 반환. 실패·빈 응답 시 None(호출부에서 기본 문구로 대체).
     """
     api_key = _get_api_key()
     if not api_key:
@@ -104,6 +104,6 @@ def fetch_impact_text(
             if text.startswith(prefix):
                 text = text[len(prefix) :].strip()
                 break
-        return text if len(text) >= 20 else None
+        return text if len(text) >= 12 else None
     except Exception:
         return None

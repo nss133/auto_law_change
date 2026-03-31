@@ -22,7 +22,9 @@ class LawChangeMeta:
     detail_url: str | None = None
     law_id: str | None = None  # 국가법령정보센터 ID(lsId, lsRvsRsnListP.do용)
     chr_cls_cd: str | None = None   # 개정구분코드(예: 010202), lsRvsRsnListP.do용
-    law_number: str | None = None   # 법률 제X호의 X (표시용, lsRvsRsnListP에서 파싱)
+    law_number: str | None = None   # 법령 제X호의 X (표시용, lsRvsRsnListP 등에서 파싱)
+    act_type_name: str | None = None  # lsStmd 법령구분명 (예: 법률, 대통령령, 재정경제부령)
+    promulgation_no: str | None = None  # lsStmd 공포번호 정규화(앞자리 0 제거) 표시용
     amendment_date_str: str | None = None  # 공포일 표시 문자열 (예: "2023. 10. 24.")
     amendment_type: str | None = None  # 일부개정, 타법개정 등 (표시용)
     # 상세 조회용 식별자

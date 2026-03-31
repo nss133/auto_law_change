@@ -26,10 +26,9 @@ pip install -r requirements.txt
 ### 환경변수
 
 - `LAW_GO_API_KEY`: 국가법령정보센터 API OC(이메일 ID). [open.law.go.kr](https://open.law.go.kr)에서 발급.
-- `GEMINI_API_KEY`: (권장) **파급효과** 문구 생성용. [Google AI Studio](https://aistudio.google.com/apikey)에서 발급. 없으면 Perplexity 또는 기본 문구 사용.
-- `PERPLEXITY_API_KEY`: (선택) 파급효과 문구 생성용 fallback. [Perplexity API](https://docs.perplexity.ai)에서 발급.
+- `GEMINI_API_KEY`: **파급효과** 문구 생성용(권장). [Google AI Studio](https://aistudio.google.com/apikey)에서 발급. 없으면 기본 문구만 사용합니다.
 
-파급효과 문단은 **Gemini → Perplexity → 기본 문구** 순으로 채워집니다. 생명보험회사 임직원 독자·-음/-임 문체로 생성됩니다.
+파급효과 문단은 **Gemini API**로 생성하고, 호출 실패 시 **기본 문구**로 둡니다. 생명보험회사 임직원 독자·-음/-임 문체로 작성하도록 프롬프트되어 있습니다.
 
 ### CLI
 
@@ -51,7 +50,6 @@ python -m law_change_auto.cli --legislation --law 자본시장
 
 - `--legislation`: 입법예고 모드
 - `--law`: 제목에 포함된 검색어 (예: 자본시장, 보험업)
-- `--no-perplexity`: 파급효과를 AI(Gemini/Perplexity)로 생성하지 않고 기본 문구만 사용 (비용 절감)
 
 ### 사규 매칭용 법령 DB 번들 (comp_matching_auto)
 

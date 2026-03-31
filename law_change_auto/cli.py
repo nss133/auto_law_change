@@ -81,11 +81,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="입법예고/규정변경예고 모드. 금융위원회 FSC 목록에서 매칭 건의 PDF 첨부를 추출해 안내서 생성.",
     )
-    parser.add_argument(
-        "--no-perplexity",
-        action="store_true",
-        help="파급효과를 AI로 생성하지 않음 (Gemini·Perplexity 모두 건너뛰고 기본 문구만 사용, 비용 절감).",
-    )
     return parser.parse_args(argv)
 
 
@@ -258,7 +253,6 @@ def _process_single_date(
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
     create_example_if_empty: bool = True,
-    use_perplexity: bool = True,
 ) -> List[Path]:
     """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. `목차.docx` 및 `N. {법령명} … 안내.docx` 목록."""
     details = _collect_details_for_date(target_date, monitored_laws, law_filter)
@@ -298,7 +292,6 @@ def _process_single_date(
         guide_date=target_date,
         period_line=period_line,
         sort_fallback=target_date,
-        use_perplexity=use_perplexity,
     )
 
 
@@ -307,7 +300,6 @@ def _process_legislation(
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
     max_items: int = 30,
-    use_perplexity: bool = True,
 ) -> Path | None:
     """입법예고/규정변경예고 (FSC) 조회·PDF 추출·안내서 생성."""
     try:
@@ -370,7 +362,7 @@ def _process_legislation(
     target_date = dt.date.today()
     notice_id = details[0].meta.law_id or "legislation"
     output_file = output_dir / f"law_change_guide_legislation_{notice_id}.docx"
-    generate_guide(details, target_date, output_file, use_perplexity=use_perplexity)
+    generate_guide(details, target_date, output_file)
     return output_file
 
 
@@ -503,7 +495,6 @@ def _write_guides_numbered_with_toc(
     guide_date: dt.date,
     period_line: str,
     sort_fallback: dt.date,
-    use_perplexity: bool,
 ) -> List[Path]:
     """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통."""
     output_dir = Path(output_dir)
@@ -517,7 +508,7 @@ def _write_guides_numbered_with_toc(
         filename = _filename_for_detail(detail, used_names)
         numbered_filename = f"{i}. {filename}"
         output_file = output_dir / numbered_filename
-        generate_guide([detail], guide_date, output_file, use_perplexity=use_perplexity)
+        generate_guide([detail], guide_date, output_file)
         created.append(output_file)
         toc_pairs.append((detail, output_file))
 
@@ -540,7 +531,6 @@ def _process_comprehensive_period(
     law_filter: str,
     date_from: dt.date,
     date_to: dt.date,
-    use_perplexity: bool = True,
 ) -> List[Path]:
     """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성. (기간 API + 병렬로 단축)"""
     all_details: List[LawChangeDetail] = _collect_details_for_range(
@@ -566,7 +556,6 @@ def _process_comprehensive_period(
         guide_date=date_to,
         period_line=period_line,
         sort_fallback=date_to,
-        use_perplexity=use_perplexity,
     )
 
 
@@ -585,11 +574,17 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] dry-run 모드이므로 DOCX를 생성하지 않습니다.")
         return
 
-    use_perplexity = not args.no_perplexity
+    from law_change_auto.services import gemini_client as _gmod
+
+    if not _gmod._get_api_key():
+        print(
+            "[law_change_auto] 경고: GEMINI_API_KEY가 없습니다. 파급효과는 기본 문구만 넣습니다.",
+            flush=True,
+        )
 
     if args.legislation:
         print("[law_change_auto] 입법예고/규정변경예고 모드")
-        result = _process_legislation(output_dir, monitored_laws, law_filter, use_perplexity=use_perplexity)
+        result = _process_legislation(output_dir, monitored_laws, law_filter)
         if result:
             print(f"[law_change_auto] 안내서 생성 완료: {result.resolve()}")
         else:
@@ -611,7 +606,7 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] 법령·시행령·행정규칙·입법예고 건별 안내서 생성 중...")
 
         created = _process_comprehensive_period(
-            output_dir, monitored_laws, law_filter, date_from, date_to, use_perplexity=use_perplexity
+            output_dir, monitored_laws, law_filter, date_from, date_to
         )
         if created:
             for path in created:
@@ -626,7 +621,7 @@ def main(argv: list[str] | None = None) -> None:
 
         created = _process_single_date(
             target_date, output_dir, monitored_laws, law_filter,
-            create_example_if_empty=True, use_perplexity=use_perplexity,
+            create_example_if_empty=True,
         )
         if created:
             for path in created:

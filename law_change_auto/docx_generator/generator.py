@@ -22,7 +22,6 @@ from docx.shared import Inches, Mm, Pt, RGBColor
 from ..fetchers.pdf_extractor import render_pdf_pages_to_images
 from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta, TextSegment
 from ..services.gemini_client import fetch_impact_text as fetch_impact_text_gemini
-from ..services.perplexity_client import fetch_impact_text as fetch_impact_text_perplexity
 
 LINE_SPACING_BODY = 1.5
 LINE_SPACING_TITLE = 1.0
@@ -87,6 +86,7 @@ class DocxGenerator:
         date_str: str = "25. 01.",
         dept: str = "법 무 팀",
         meta_line_override: str | None = None,
+        promulgation_kind: str = "법률",
     ) -> None:
         if meta_line_override or enforcement_date or law_number or amendment_date:
             meta1 = self.doc.add_paragraph()
@@ -94,9 +94,15 @@ class DocxGenerator:
             if meta_line_override:
                 meta_line = meta_line_override
             elif amendment_type:
-                meta_line = f"[시행 {enforcement_date}] [법률 제{law_number}호, {amendment_date}, {amendment_type}]"
+                meta_line = (
+                    f"[시행 {enforcement_date}] "
+                    f"[{promulgation_kind} 제{law_number}호, {amendment_date}, {amendment_type}]"
+                )
             else:
-                meta_line = f"[시행 {enforcement_date}] [법률 제{law_number}호, {amendment_date}]"
+                meta_line = (
+                    f"[시행 {enforcement_date}] "
+                    f"[{promulgation_kind} 제{law_number}호, {amendment_date}]"
+                )
             run = meta1.add_run(meta_line)
             run.bold = True
             run.font.size = Pt(14)
@@ -269,6 +275,32 @@ def _clean_revision_paras(paras: List[str]) -> List[str]:
     return result
 
 
+def _promulgation_kind_for_meta(meta: LawChangeMeta) -> str:
+    """메타 두 번째 괄호 앞 규종 표기. lsStmd 법령구분명(부령·대통령령 등) 우선."""
+    k = (meta.act_type_name or "").strip()
+    if k:
+        return k
+    if meta.category == "행정규칙":
+        return "행정규칙"
+    n = meta.law_name or ""
+    if "시행규칙" in n:
+        return "부령"
+    if "시행령" in n:
+        return "대통령령"
+    return "법률"
+
+
+def _display_promulgation_number(meta: LawChangeMeta) -> str:
+    for candidate in (meta.promulgation_no, meta.law_number):
+        if not candidate:
+            continue
+        s = str(candidate).strip()
+        if s.isdigit():
+            return str(int(s))
+        return s
+    return (meta.law_id or "").strip()
+
+
 def _fallback_reason_message(meta: LawChangeMeta) -> str:
     """개정이유 본문을 수집하지 못했을 때 기본 안내 문구를 생성한다."""
     if meta.category == "행정규칙":
@@ -282,7 +314,6 @@ def _detail_to_docx(
     detail: LawChangeDetail,
     target_date: date,
     generator: DocxGenerator,
-    use_perplexity: bool = True,
 ) -> None:
     meta = detail.meta
     if meta.category == "행정규칙":
@@ -300,8 +331,11 @@ def _detail_to_docx(
 
     enforcement_date = _fmt_date(meta.effective_date)
     amendment_date = meta.amendment_date_str or _fmt_date(meta.announcement_date)
-    law_number = meta.law_number or (meta.law_id if meta.category != "입법예고" else "")
+    law_number = _display_promulgation_number(meta) or (
+        meta.law_id if meta.category != "입법예고" else ""
+    )
     amendment_type = meta.amendment_type or ""
+    promulgation_kind = _promulgation_kind_for_meta(meta)
 
     meta_line_override = None
     if meta.category == "입법예고" and amendment_date:
@@ -314,6 +348,7 @@ def _detail_to_docx(
         amendment_type=amendment_type,
         date_str=target_date.strftime("%Y. %m."),
         meta_line_override=meta_line_override,
+        promulgation_kind=promulgation_kind,
     )
 
     # 1. 개정이유 / 2. 주요내용 (기존 방식)
@@ -341,15 +376,11 @@ def _detail_to_docx(
         impact_num = "2"
         table_num = "3"
 
-    # 파급효과 (Gemini 우선 → Perplexity → 기본 문구)
+    # 파급효과 (Gemini → 실패 시 기본 문구)
     fallback_impact = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
-    impact_text = fallback_impact
-    if use_perplexity:
-        impact_text = (
-            fetch_impact_text_gemini(meta.law_name, reason_paras, main_paras)
-            or fetch_impact_text_perplexity(meta.law_name, reason_paras, main_paras)
-            or fallback_impact
-        )
+    impact_text = (
+        fetch_impact_text_gemini(meta.law_name, reason_paras, main_paras) or fallback_impact
+    )
     generator.add_section(impact_num, "파급효과", impact_text, is_bold=True)
 
     # 신구조문 대비표
@@ -415,7 +446,6 @@ def generate_guide(
     details: LawChangeDetailSeq,
     target_date: date,
     output_path: Path,
-    use_perplexity: bool = True,
 ) -> Path:
     """LawChangeDetail를 DOCX로 변환한다. 여러 건이면 각 건마다 페이지로 구분하여 삽입."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -424,7 +454,7 @@ def generate_guide(
         for i, detail in enumerate(details):
             if i > 0:
                 generator.add_page_break()
-            _detail_to_docx(detail, target_date, generator, use_perplexity)
+            _detail_to_docx(detail, target_date, generator)
     else:
         generator.add_title("법령제·개정 안내서")
         generator.add_metadata("", "", "", date_str=target_date.strftime("%y. %m."))
