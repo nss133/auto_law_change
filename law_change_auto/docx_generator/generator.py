@@ -104,6 +104,38 @@ class DocxGenerator:
 
         self.doc.add_paragraph()
 
+    def add_notice_metadata(
+        self,
+        notice_period: str,
+        law_type_name: str = "",
+        date_str: str = "25. 01.",
+        dept: str = "법 무 팀",
+    ) -> None:
+        """입법예고용 메타데이터 (예고기간)."""
+        if notice_period:
+            meta1 = self.doc.add_paragraph()
+            meta1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            meta_line = f"[예고기간: {notice_period}]"
+            run = meta1.add_run(meta_line)
+            run.bold = True
+            run.font.size = Pt(14)
+            run.font.name = "KoPub돋움체_Pro Bold"
+            meta1.paragraph_format.line_spacing = LINE_SPACING_TITLE
+            meta1.paragraph_format.space_before = PARAGRAPH_SPACING_BEFORE
+            meta1.paragraph_format.space_after = PARAGRAPH_SPACING_AFTER
+
+        date_p = self.doc.add_paragraph()
+        date_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        date_p.add_run(date_str)
+        _apply_body_format(date_p)
+
+        dept_p = self.doc.add_paragraph()
+        dept_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        dept_p.add_run(dept)
+        _apply_body_format(dept_p)
+
+        self.doc.add_paragraph()
+
     def add_section(
         self, number: str, title: str, content: str | List[str] | None = None, is_bold: bool = False
     ) -> None:
@@ -225,32 +257,42 @@ def _detail_to_docx(detail: LawChangeDetail, target_date: date, generator: DocxG
             return ""
         return f"{d.year}. {d.month}. {d.day}."
 
-    enforcement_date = _fmt_date(meta.effective_date)
-    amendment_date = meta.amendment_date_str or _fmt_date(meta.announcement_date)
-    law_number = meta.law_number or meta.law_id or ""
-    amendment_type = meta.amendment_type or ""
+    if meta.category == "입법예고":
+        # 입법예고: 예고기간 표시
+        start_str = _fmt_date(meta.announcement_date)
+        end_str = _fmt_date(meta.effective_date)
+        notice_period = f"{start_str} ~ {end_str}" if start_str and end_str else ""
+        generator.add_notice_metadata(
+            notice_period=notice_period,
+            date_str=target_date.strftime("%Y. %m."),
+        )
+    else:
+        enforcement_date = _fmt_date(meta.effective_date)
+        amendment_date = meta.amendment_date_str or _fmt_date(meta.announcement_date)
+        law_number = meta.law_number or meta.law_id or ""
+        amendment_type = meta.amendment_type or ""
 
-    # 법령 유형 레이블 결정: API 메타 > 법령명 기반 추론 > 기본값
-    law_type_label = meta.law_type_label
-    if not law_type_label:
-        name = meta.law_name
-        if "시행규칙" in name:
-            law_type_label = "부령"
-        elif "시행령" in name:
-            law_type_label = "대통령령"
-        elif meta.category == "행정규칙":
-            law_type_label = "고시"
-        else:
-            law_type_label = "법률"
+        # 법령 유형 레이블 결정: API 메타 > 법령명 기반 추론 > 기본값
+        law_type_label = meta.law_type_label
+        if not law_type_label:
+            name = meta.law_name
+            if "시행규칙" in name:
+                law_type_label = "부령"
+            elif "시행령" in name:
+                law_type_label = "대통령령"
+            elif meta.category == "행정규칙":
+                law_type_label = "고시"
+            else:
+                law_type_label = "법률"
 
-    generator.add_metadata(
-        enforcement_date=enforcement_date,
-        law_number=law_number,
-        amendment_date=amendment_date,
-        amendment_type=amendment_type,
-        law_type_label=law_type_label,
-        date_str=target_date.strftime("%Y. %m."),
-    )
+        generator.add_metadata(
+            enforcement_date=enforcement_date,
+            law_number=law_number,
+            amendment_date=amendment_date,
+            amendment_type=amendment_type,
+            law_type_label=law_type_label,
+            date_str=target_date.strftime("%Y. %m."),
+        )
 
     is_combined = bool(detail.combined_reason_and_main_sections)
 
@@ -274,26 +316,31 @@ def _detail_to_docx(detail: LawChangeDetail, target_date: date, generator: DocxG
         impact_text = detail.impact_analysis
     else:
         impact_text = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
+
+    is_notice = meta.category == "입법예고"
+
     if is_combined:
-        # 1. 개정이유 및 주요내용
-        # 2. 파급효과
-        # 3. 신구조문 대비표
         sec_impact = "2"
         sec_table = "3"
     else:
-        # 1. 개정이유
-        # 2. 주요내용
-        # 3. 파급효과
-        # 4. 신구조문 대비표
         sec_impact = "3"
         sec_table = "4"
-    generator.add_section(sec_impact, "파급효과", impact_text, is_bold=True)
-    generator.add_section(sec_table, "신구조문 대비표")
 
-    comparison_table: List[Tuple[str, str]] = [
-        ((row.old_text or "").strip(), (row.new_text or "").strip()) for row in detail.article_comparisons
-    ]
-    generator.add_comparison_table(comparison_table)
+    generator.add_section(sec_impact, "파급효과", impact_text, is_bold=True)
+
+    if is_notice:
+        # 입법예고: 향후 일정
+        next_num = str(int(sec_impact) + 1)
+        end_str = _fmt_date(meta.effective_date) if meta.effective_date else ""
+        schedule_text = f"의견제출 마감: {end_str}" if end_str else "의견제출 기간 확인 필요"
+        generator.add_section(next_num, "향후 일정", schedule_text)
+
+    else:
+        generator.add_section(sec_table, "신구조문 대비표")
+        comparison_table: List[Tuple[str, str]] = [
+            ((row.old_text or "").strip(), (row.new_text or "").strip()) for row in detail.article_comparisons
+        ]
+        generator.add_comparison_table(comparison_table)
 
 
 def generate_guide(details: LawChangeDetailSeq, target_date: date, output_path: Path) -> Path:

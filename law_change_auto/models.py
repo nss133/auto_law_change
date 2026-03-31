@@ -52,6 +52,7 @@ class LawChangeDetail:
     combined_reason_and_main_sections: list[str] = field(default_factory=list)
     article_comparisons: list[ArticleComparisonRow] = field(default_factory=list)
     impact_analysis: str | None = None  # Gemini API 생성 파급효과
+    attachments: list[dict] = field(default_factory=list)  # 입법예고 첨부파일 [{"name":..,"url":..}]
 
     def has_any_content(self) -> bool:
         return any(
