@@ -38,7 +38,7 @@ pip install -r requirements.txt
    ```bash
    python -m law_change_auto.cli --date 2024-10-25 --law 보험업법
    ```
-3. `output/` 폴더에 `law_change_guide_YYYYMMDD.docx` 생성
+3. `output/` 폴더에 **`목차.docx`**와 **`1. {법령명} 시행 안내.docx`** 등 번호 붙은 파일이 생성됩니다(건수만큼). 기간 모드(`--date-from`/`--date-to`)와 동일한 파일명 규칙입니다.
 
 ### 입법예고/규정변경예고 모드
 
@@ -52,6 +52,19 @@ python -m law_change_auto.cli --legislation --law 자본시장
 - `--legislation`: 입법예고 모드
 - `--law`: 제목에 포함된 검색어 (예: 자본시장, 보험업)
 - `--no-perplexity`: 파급효과를 AI(Gemini/Perplexity)로 생성하지 않고 기본 문구만 사용 (비용 절감)
+
+### 사규 매칭용 법령 DB 번들 (comp_matching_auto)
+
+`data/monitored_laws.xlsx`에 있는 법령명마다 **lsRlt(관련법령)** 로 법률·시행령·시행규칙을 묶어 확장한 뒤, 각각 현행 본문을 받아 형제 폴더 `comp_matching_auto/data/laws_monitored.sqlite`에 조문 단위로 저장합니다. (목록이 법률이면 시행령·시행규칙까지, 시행령이면 모법·시행규칙까지.) `LAW_GO_API_KEY` 및 [open.law.go.kr](https://open.law.go.kr) 허용 IP 등록이 필요합니다.
+
+```bash
+python -m law_change_auto.bundle_comp_matching_laws
+# 출력 경로 지정: -o /path/to/laws.sqlite
+# CSV 백업: --also-csv backup.csv
+# 확장 없이 예전 방식만: --legacy-single
+```
+
+`comp_matching_auto` 쪽에서는 `./sync_laws_from_law_change_auto.sh`로 동일 작업을 호출할 수 있습니다.
 
 ### 특정 법령(lsiSeq) 기준 테스트
 

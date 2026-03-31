@@ -73,12 +73,19 @@ HEADERS = {
 
 
 def _parse_yyyy_mm_dd(text: str) -> Optional[date]:
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
-    if m:
-        try:
-            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            pass
+    """목록 행 메타 텍스트에서 날짜 1건 추출. ISO, 점/슬래시 구분 모두 시도."""
+    for pattern in (
+        r"(\d{4})-(\d{2})-(\d{2})",
+        r"(\d{4})[.](\d{1,2})[.](\d{1,2})",
+        r"(\d{4})/(\d{1,2})/(\d{1,2})",
+    ):
+        m = re.search(pattern, text)
+        if m:
+            try:
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                return date(y, mo, d)
+            except ValueError:
+                continue
     return None
 
 

@@ -84,7 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-perplexity",
         action="store_true",
-        help="파급효과를 Perplexity API로 생성하지 않고 기본 문구만 사용 (비용 절감용).",
+        help="파급효과를 AI로 생성하지 않음 (Gemini·Perplexity 모두 건너뛰고 기본 문구만 사용, 비용 절감).",
     )
     return parser.parse_args(argv)
 
@@ -259,9 +259,18 @@ def _process_single_date(
     law_filter: str,
     create_example_if_empty: bool = True,
     use_perplexity: bool = True,
-) -> Path | None:
-    """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. 생성된 파일 경로를 반환하고, 건이 없으면 None."""
+) -> List[Path]:
+    """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. `목차.docx` 및 `N. {법령명} … 안내.docx` 목록."""
     details = _collect_details_for_date(target_date, monitored_laws, law_filter)
+
+    # 금융위 입법예고·규정변경예고: --date-from/--date-to 기간 모드와 같이 예고일(게시일)이 해당 일자인 건만 병합
+    try:
+        legis_details = _collect_legislation_details(
+            output_dir, monitored_laws, law_filter, target_date, target_date
+        )
+        details.extend(legis_details)
+    except Exception as e:
+        print(f"[law_change_auto] 입법예고 수집 중 오류(무시하고 계속): {e}")
 
     if not details:
         if create_example_if_empty and monitored_laws:
@@ -280,11 +289,17 @@ def _process_single_date(
                 )
             )
         else:
-            return None
+            return []
 
-    output_file = output_dir / f"law_change_guide_{target_date.strftime('%Y%m%d')}.docx"
-    generate_guide(details, target_date, output_file, use_perplexity=use_perplexity)
-    return output_file
+    period_line = f"{target_date.year}. {target_date.month}. {target_date.day}."
+    return _write_guides_numbered_with_toc(
+        details,
+        output_dir,
+        guide_date=target_date,
+        period_line=period_line,
+        sort_fallback=target_date,
+        use_perplexity=use_perplexity,
+    )
 
 
 def _process_legislation(
@@ -481,6 +496,44 @@ def _sort_details_for_period_toc(details: List[LawChangeDetail], fallback_date: 
     )
 
 
+def _write_guides_numbered_with_toc(
+    details: List[LawChangeDetail],
+    output_dir: Path,
+    *,
+    guide_date: dt.date,
+    period_line: str,
+    sort_fallback: dt.date,
+    use_perplexity: bool,
+) -> List[Path]:
+    """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sorted_details = _sort_details_for_period_toc(details, sort_fallback)
+    used_names: Set[str] = set()
+    created: List[Path] = []
+    toc_pairs: List[Tuple[LawChangeDetail, Path]] = []
+
+    for i, detail in enumerate(sorted_details, start=1):
+        filename = _filename_for_detail(detail, used_names)
+        numbered_filename = f"{i}. {filename}"
+        output_file = output_dir / numbered_filename
+        generate_guide([detail], guide_date, output_file, use_perplexity=use_perplexity)
+        created.append(output_file)
+        toc_pairs.append((detail, output_file))
+
+    toc_lines: List[str] = []
+    for i, (detail, out_path) in enumerate(toc_pairs, start=1):
+        sd = _detail_sort_date_for_toc(detail, sort_fallback)
+        date_fmt = f"{sd.year}. {sd.month}. {sd.day}."
+        title = guide_display_title(detail.meta)
+        toc_lines.append(f"{i}. {date_fmt} {title} ({out_path.name})")
+
+    toc_path = output_dir / "목차.docx"
+    write_period_toc_docx(toc_path, period_line, toc_lines)
+    created.insert(0, toc_path)
+    return created
+
+
 def _process_comprehensive_period(
     output_dir: Path,
     monitored_laws: List[MonitoredLaw],
@@ -503,38 +556,18 @@ def _process_comprehensive_period(
         print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
         return []
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    sorted_details = _sort_details_for_period_toc(all_details, date_to)
-    used_names: Set[str] = set()
-    created: List[Path] = []
-    toc_pairs: List[Tuple[LawChangeDetail, Path]] = []
-
-    for i, detail in enumerate(sorted_details, start=1):
-        filename = _filename_for_detail(detail, used_names)
-        numbered_filename = f"{i}. {filename}"
-        output_file = output_dir / numbered_filename
-        generate_guide([detail], date_to, output_file, use_perplexity=use_perplexity)
-        created.append(output_file)
-        toc_pairs.append((detail, output_file))
-
     period_line = (
         f"{date_from.year}. {date_from.month}. {date_from.day}. "
         f"~ {date_to.year}. {date_to.month}. {date_to.day}."
     )
-    toc_lines: List[str] = []
-    for i, (detail, out_path) in enumerate(toc_pairs, start=1):
-        sd = _detail_sort_date_for_toc(detail, date_to)
-        date_fmt = f"{sd.year}. {sd.month}. {sd.day}."
-        title = guide_display_title(detail.meta)
-        toc_lines.append(f"{i}. {date_fmt} {title} ({out_path.name})")
-
-    toc_path = output_dir / "목차.docx"
-    write_period_toc_docx(toc_path, period_line, toc_lines)
-    created.insert(0, toc_path)
-
-    return created
+    return _write_guides_numbered_with_toc(
+        all_details,
+        output_dir,
+        guide_date=date_to,
+        period_line=period_line,
+        sort_fallback=date_to,
+        use_perplexity=use_perplexity,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -591,12 +624,14 @@ def main(argv: list[str] | None = None) -> None:
         target_date = _resolve_target_date(args.date)
         print(f"[law_change_auto] 기준일자: {target_date.isoformat()}")
 
-        result = _process_single_date(
+        created = _process_single_date(
             target_date, output_dir, monitored_laws, law_filter,
             create_example_if_empty=True, use_perplexity=use_perplexity,
         )
-        if result:
-            print(f"[law_change_auto] 안내서 생성 완료: {result.resolve()}")
+        if created:
+            for path in created:
+                print(f"[law_change_auto] 생성: {path.name}")
+            print(f"[law_change_auto] 안내서 생성 완료 ({len(created)}개)")
         else:
             print("[law_change_auto] 해당 일자에 매칭되는 변경이 없습니다.")
 
