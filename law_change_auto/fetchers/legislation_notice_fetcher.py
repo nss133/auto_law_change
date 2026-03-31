@@ -275,10 +275,17 @@ def get_legislation_notices_for_monitored(
         except Exception:
             continue
 
+        norm_keyword = keyword.replace(" ", "")
+
         for item in items:
             seq = item["law_seq"]
             if seq in seen_seqs:
                 continue
+
+            # 검색 결과 타이틀에 키워드가 실제로 포함된 것만 (모니터링 대상과 무관한 법령 제외)
+            if norm_keyword not in item["title"].replace(" ", ""):
+                continue
+
             seen_seqs.add(seq)
 
             start = item.get("start_date")
