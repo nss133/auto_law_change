@@ -55,18 +55,28 @@ def _find_db_path() -> Path | None:
 # ── DB 조회 ───────────────────────────────────────────────────────
 
 
+# 허용된 부처 소스 (금융위원회, 금융감독원, 개인정보보호위원회, 공정거래위원회)
+_ALLOWED_SOURCES = {"fsc", "fss", "pipc", "kftc"}
+
+# 국회 법안 단계 항목 제외 키워드
+_ASSEMBLY_EXCLUDE_KEYWORDS = ["(대안)", "위원장", "원안가결", "법제사법위원회", "수정가결"]
+
+
 def _query_legislation_items(db_path: Path) -> list[dict]:
-    """briefing DB에서 legislation 카테고리 항목을 읽는다."""
+    """briefing DB에서 허용된 부처의 legislation 카테고리 항목을 읽는다."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
+        placeholders = ",".join("?" * len(_ALLOWED_SOURCES))
         rows = conn.execute(
-            """
+            f"""
             SELECT source, category, title, url, published_at, attachments_json
             FROM items
             WHERE category IN ('legislation', 'admin_notice')
+              AND source IN ({placeholders})
             ORDER BY published_at DESC
-            """
+            """,
+            tuple(_ALLOWED_SOURCES),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -85,11 +95,18 @@ def match_briefing_items(
     items: list[dict],
     monitored_names: list[str],
 ) -> list[dict]:
-    """briefing DB 항목 중 모니터링 대상 법령명이 제목에 포함된 것만 필터링."""
+    """briefing DB 항목 중 모니터링 대상 법령명이 제목에 포함된 것만 필터링.
+
+    국회 법안 단계 항목(대안, 위원장 제출 등)은 제외한다.
+    """
     norm_names = [_normalize(n) for n in monitored_names]
     matched: list[dict] = []
     for item in items:
-        norm_title = _normalize(item["title"])
+        title = item["title"]
+        # 국회 법안 단계 항목 제외
+        if any(kw in title for kw in _ASSEMBLY_EXCLUDE_KEYWORDS):
+            continue
+        norm_title = _normalize(title)
         for nn in norm_names:
             # 법령명 앞 8자까지만 매칭 (시행령/규칙 등 하위법 포함)
             keyword = nn[:8]

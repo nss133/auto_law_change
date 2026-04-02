@@ -332,6 +332,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"    → {f.name}")
 
     # 입법예고 첨부파일 다운로드 (안내서와 같은 폴더에 저장)
+    # PDF 법령안 파일만 다운로드 (조문별 제개정이유서 등 제외)
     for detail in details:
         if detail.meta.category != "입법예고" or not detail.attachments:
             continue
@@ -340,7 +341,16 @@ def main(argv: list[str] | None = None) -> None:
             att_url = att.get("url", "")
             if not att_name or not att_url:
                 continue
+            # PDF 파일이 아니면 스킵
+            if not att_url.lower().endswith(".pdf") and ".pdf" not in att_url.lower():
+                continue
+            # 법령안 파일만 포함 (조문별 제개정이유서 등 제외)
+            if "법령안" not in att_name and "법령 안" not in att_name:
+                continue
             safe_att = re.sub(r'[\\/:*?"<>|]', "_", att_name)
+            # 파일명에 .pdf 확장자 없으면 추가
+            if not safe_att.lower().endswith(".pdf"):
+                safe_att += ".pdf"
             att_path = output_dir / safe_att
             try:
                 resp = __import__("requests").get(att_url, timeout=30)
