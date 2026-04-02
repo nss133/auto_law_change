@@ -313,14 +313,16 @@ def get_legislation_notices_for_monitored(
 
 
 def fetch_notice_as_detail(meta: LawChangeMeta) -> LawChangeDetail | None:
-    """입법예고 LawChangeMeta로부터 상세 내용을 가져와 LawChangeDetail을 생성한다."""
+    """입법예고 LawChangeMeta로부터 상세 내용을 가져와 LawChangeDetail을 생성한다.
+
+    moleg.go.kr 상세 페이지가 실패하더라도 검색 메타데이터만으로 최소한의
+    LawChangeDetail을 반환하여 안내서 누락을 방지한다.
+    """
     law_seq = meta.law_id
     if not law_seq:
         return None
 
     info = fetch_legislation_notice_detail(law_seq)
-    if not info.get("reason") and not info.get("main_content") and not info.get("full_text"):
-        return None
 
     # 법령종류 레이블 설정
     meta.law_type_label = info.get("law_type_name") or None
@@ -328,20 +330,27 @@ def fetch_notice_as_detail(meta: LawChangeMeta) -> LawChangeDetail | None:
 
     reason = info.get("reason", "")
     main_content = info.get("main_content", "")
-
+    full_text = info.get("full_text", "")
     attachments = info.get("attachments", [])
 
     if reason and main_content:
         return LawChangeDetail(
             meta=meta,
-            reason_sections=[reason] if reason else [],
-            main_change_sections=[main_content] if main_content else [],
+            reason_sections=[reason],
+            main_change_sections=[main_content],
+            attachments=attachments,
+        )
+    elif full_text:
+        return LawChangeDetail(
+            meta=meta,
+            combined_reason_and_main_sections=[full_text],
             attachments=attachments,
         )
     else:
-        combined = info.get("full_text", "")
+        # moleg.go.kr 상세 페이지 실패 시에도 메타데이터만으로 안내서 생성
         return LawChangeDetail(
             meta=meta,
-            combined_reason_and_main_sections=[combined] if combined else [],
+            reason_sections=[],
+            main_change_sections=[],
             attachments=attachments,
         )

@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
             for nm in notice_metas:
                 try:
                     nd = fetch_notice_as_detail(nm)
-                    if nd and nd.has_any_content():
+                    if nd:
                         legislation_notice_details.append(nd)
                 except Exception as e:
                     print(f"[law_change_auto] 입법예고 상세 조회 실패: {nm.law_name}: {e}")
