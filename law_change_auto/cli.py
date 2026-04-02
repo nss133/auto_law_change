@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import re
+from datetime import date
 from pathlib import Path
 from typing import List
 
@@ -11,11 +13,17 @@ from .fetchers.national_law_fetcher import (
     get_law_changes_for_monitored,
     get_recent_admin_rule_changes,
 )
+from .fetchers.web_scraper import cross_check_and_merge, scrape_recent_promulgated_laws
 from .fetchers.content_fetcher import (
     fetch_old_new_html,
     fetch_revision_html,
     fetch_revision_reason_from_ls_rvs_rsn_list,
 )
+from .fetchers.legislation_notice_fetcher import (
+    get_legislation_notices_for_monitored,
+    fetch_notice_as_detail,
+)
+from .ai.gemini_impact import generate_impact_analysis
 from .matching.law_matcher import MatchResult, match_laws
 from .models import LawChangeDetail, LawChangeMeta
 from .parsers.law_change_parser import parse_law_change
@@ -47,6 +55,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="",
         help="특정 법령명에 대해 안내서를 생성할 때 사용 (부분일치, 예: 보험업법)",
+    )
+    parser.add_argument(
+        "--no-web-check",
+        action="store_true",
+        help="웹 스크래핑 기반 교차검증을 비활성화합니다.",
     )
     return parser.parse_args(argv)
 
@@ -89,6 +102,58 @@ def main(argv: list[str] | None = None) -> None:
     all_metas: List[LawChangeMeta] = [*law_metas, *admin_rule_metas]
     print(f"[law_change_auto] 수집된 원천 변경 건수: {len(all_metas)}")
 
+    # 2-1. 웹 스크래핑 교차검증
+    if not args.no_web_check:
+        try:
+            web_metas = scrape_recent_promulgated_laws(target_date)
+            if web_metas:
+                missing = cross_check_and_merge(all_metas, web_metas)
+                if missing:
+                    print(
+                        f"[law_change_auto] 웹 교차검증: API에 누락된 {len(missing)}건 추가 발견"
+                    )
+                    for m in missing:
+                        anc = m.announcement_date.isoformat() if m.announcement_date else "-"
+                        eff = m.effective_date.isoformat() if m.effective_date else "-"
+                        print(f"    + {m.law_name} (공포={anc}, 시행={eff}, src={m.source})")
+                    all_metas.extend(missing)
+                else:
+                    print(
+                        f"[law_change_auto] 웹 교차검증: 웹 {len(web_metas)}건 조회, API 누락건 없음"
+                    )
+            else:
+                print("[law_change_auto] 웹 교차검증: 해당 일자 공포/시행 법령 0건")
+        except Exception as e:
+            print(f"[law_change_auto] 경고: 웹 교차검증 중 오류 발생 (무시): {e}")
+
+    # 2-2. 법제처 입법예고 조회
+    legislation_notice_details: List[LawChangeDetail] = []
+    law_filter = (args.law or "").strip()
+    try:
+        monitored_names = [law.name for law in monitored_laws]
+        if law_filter:
+            monitored_names = [n for n in monitored_names if law_filter in n]
+        notice_metas = get_legislation_notices_for_monitored(
+            monitored_names, active_date=target_date
+        )
+        if notice_metas:
+            print(f"[law_change_auto] 입법예고: {len(notice_metas)}건 발견")
+            for nm in notice_metas:
+                start = nm.announcement_date.isoformat() if nm.announcement_date else "-"
+                end = nm.effective_date.isoformat() if nm.effective_date else "-"
+                print(f"    * {nm.law_name} (예고기간={start}~{end})")
+            for nm in notice_metas:
+                try:
+                    nd = fetch_notice_as_detail(nm)
+                    if nd:
+                        legislation_notice_details.append(nd)
+                except Exception as e:
+                    print(f"[law_change_auto] 입법예고 상세 조회 실패: {nm.law_name}: {e}")
+        else:
+            print("[law_change_auto] 입법예고: 해당 일자 진행 중인 건 없음")
+    except Exception as e:
+        print(f"[law_change_auto] 경고: 입법예고 조회 중 오류 발생 (무시): {e}")
+
     if law_metas:
         print("[law_change_auto]  └ 법령 변경 목록:")
         for m in law_metas:
@@ -107,7 +172,6 @@ def main(argv: list[str] | None = None) -> None:
     matches: List[MatchResult] = match_laws(monitored_laws, all_metas, threshold=0.8)
 
     # --law 옵션이 있으면 해당 문자열이 포함된 법령명만 필터링
-    law_filter = (args.law or "").strip()
     if law_filter:
         filtered: List[MatchResult] = [
             m for m in matches if law_filter in m.meta.law_name
@@ -129,12 +193,11 @@ def main(argv: list[str] | None = None) -> None:
         revision_text_from_list: str | None = None
         old_new_xml: str | None = None
 
-        if meta.law_type == "ls" and meta.law_id and meta.effective_date:
+        if meta.law_type == "ls" and meta.law_id and meta.chr_cls_cd and meta.effective_date:
             date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
-            chr_cls_cd = meta.chr_cls_cd or "010202"
             try:
                 text, display_meta = fetch_revision_reason_from_ls_rvs_rsn_list(
-                    meta.law_id, chr_cls_cd, date_str
+                    meta.law_id, meta.chr_cls_cd, date_str
                 )
                 if text:
                     revision_text_from_list = text
@@ -142,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
                     meta.law_number = display_meta.get("law_number")
                     meta.amendment_date_str = display_meta.get("amendment_date_str")
                     meta.amendment_type = display_meta.get("amendment_type")
+                    meta.law_type_label = display_meta.get("law_type_label")
             except Exception as e:
                 print(f"[law_change_auto] lsRvsRsnListP 개정이유 조회 실패: {meta.law_name}: {e}")
 
@@ -164,26 +228,93 @@ def main(argv: list[str] | None = None) -> None:
         )
         details.append(detail)
 
-    # 매칭/파싱된 내용이 하나도 없으면 예시 데이터로 기본 구조만 생성
-    if not details and monitored_laws:
-        first = monitored_laws[0]
-        meta = LawChangeMeta(
-            law_name=first.name,
-            category="법령",
-            change_type="기타",
-            announcement_date=target_date,
-        )
-        details.append(
-            LawChangeDetail(
-                meta=meta,
-                reason_sections=["(예시) 개정이유 내용이 여기에 들어갑니다."],
-                main_change_sections=["(예시) 주요 개정사항 내용이 여기에 들어갑니다."],
-            )
-        )
+    # 입법예고 details 합산 (--law 필터 적용, 공백 무시 비교)
+    if law_filter:
+        norm_filter = law_filter.replace(" ", "")
+        legislation_notice_details = [
+            d for d in legislation_notice_details
+            if norm_filter in d.meta.law_name.replace(" ", "")
+        ]
+    if legislation_notice_details:
+        print(f"[law_change_auto] 입법예고 안내서 포함: {len(legislation_notice_details)}건")
+        details.extend(legislation_notice_details)
 
-    output_file = output_dir / f"law_change_guide_{target_date.strftime('%Y%m%d')}.docx"
-    generate_guide(details, target_date, output_file)
-    print(f"[law_change_auto] 안내서 생성 완료: {output_file.resolve()}")
+    # lsi_seq / admrul_seq 기준 중복 제거 (같은 법령이 여러 모니터링 항목에 매칭될 경우)
+    seen_seqs: set[str] = set()
+    deduped: List[LawChangeDetail] = []
+    for d in details:
+        seq_key = d.meta.lsi_seq or d.meta.admrul_seq or f"{d.meta.law_name}_{d.meta.announcement_date}"
+        if seq_key in seen_seqs:
+            continue
+        seen_seqs.add(seq_key)
+        deduped.append(d)
+    if len(deduped) < len(details):
+        print(f"[law_change_auto] 중복 제거: {len(details)}건 → {len(deduped)}건")
+    details = deduped
+
+    # 시행/공포 일자가 빠른 순으로 정렬
+    def _sort_key(d: LawChangeDetail) -> date:
+        return d.meta.effective_date or d.meta.announcement_date or date.max
+
+    details.sort(key=_sort_key)
+
+    # 매칭 건이 없으면 파일을 생성하지 않음
+    if not details:
+        print(f"[law_change_auto] 매칭 건 없음 — 안내서 미생성")
+        return
+
+    # Gemini API로 파급효과 생성
+    for detail in details:
+        try:
+            impact = generate_impact_analysis(detail)
+            if impact:
+                detail.impact_analysis = impact
+                print(f"[law_change_auto] 파급효과 생성 완료: {detail.meta.law_name}")
+        except Exception as e:
+            print(f"[law_change_auto] 파급효과 생성 실패: {detail.meta.law_name}: {e}")
+
+    # 법령별 개별 파일 생성 (파일명: '{법령명} 시행안내_{번호}.docx')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated_files: list[Path] = []
+    for idx, detail in enumerate(details, start=1):
+        meta = detail.meta
+        if meta.category == "행정규칙":
+            title_suffix = "고시 규정변경예고 안내"
+        elif meta.category == "입법예고":
+            title_suffix = "입법예고 안내"
+        else:
+            title_suffix = "시행안내"
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", meta.law_name)
+        # 법령명에 이미 "입법예고"/"규정변경예고"가 포함된 경우 title_suffix에서 중복 방지
+        if meta.category == "입법예고" and ("입법예고" in safe_name or "규정변경예고" in safe_name):
+            title_suffix = "안내"
+        filename = f"{safe_name} {title_suffix}_{idx:03d}.docx"
+        output_file = output_dir / filename
+        generate_guide([detail], target_date, output_file)
+        generated_files.append(output_file)
+
+    print(f"[law_change_auto] 안내서 {len(generated_files)}건 생성 완료:")
+    for f in generated_files:
+        print(f"    → {f.name}")
+
+    # 입법예고 첨부파일 다운로드 (안내서와 같은 폴더에 저장)
+    for detail in details:
+        if detail.meta.category != "입법예고" or not detail.attachments:
+            continue
+        for att in detail.attachments:
+            att_name = att.get("name", "")
+            att_url = att.get("url", "")
+            if not att_name or not att_url:
+                continue
+            safe_att = re.sub(r'[\\/:*?"<>|]', "_", att_name)
+            att_path = output_dir / safe_att
+            try:
+                resp = __import__("requests").get(att_url, timeout=30)
+                resp.raise_for_status()
+                att_path.write_bytes(resp.content)
+                print(f"    📎 {safe_att}")
+            except Exception as e:
+                print(f"[law_change_auto] 첨부파일 다운로드 실패: {att_name}: {e}")
 
 
 if __name__ == "__main__":

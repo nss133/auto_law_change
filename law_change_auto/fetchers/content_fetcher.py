@@ -15,7 +15,7 @@ HEADERS = {
 
 
 _META_LINE_RE = re.compile(
-    r"\[시행\s+[^\]]+\]\s*\[법률\s*제(\d+)호,\s*([^,\]]+),\s*([^\]]+)\]"
+    r"\[시행\s+[^\]]+\]\s*\[([^\s]+)\s*제(\d+)호,\s*([^,\]]+),\s*([^\]]+)\]"
 )
 
 
@@ -67,9 +67,10 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
         metadata = None
         if meta_match:
             metadata = {
-                "law_number": meta_match.group(1),
-                "amendment_date_str": meta_match.group(2).strip(),
-                "amendment_type": meta_match.group(3).strip(),
+                "law_type_label": meta_match.group(1).strip(),
+                "law_number": meta_match.group(2),
+                "amendment_date_str": meta_match.group(3).strip(),
+                "amendment_type": meta_match.group(4).strip(),
             }
 
         reason_start = block.find("【제정·개정이유】")
@@ -84,11 +85,11 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
 def fetch_revision_html(meta: LawChangeMeta) -> str | None:
     """법령/행정규칙의 제정·개정이유 HTML을 가져온다."""
     if meta.law_type == "ls" and meta.lsi_seq:
-        # 예: lsInfoP.do?lsiSeq=255535&viewCls=lsRvsDocInfoR
-        url = f"https://www.law.go.kr/lsInfoP.do?lsiSeq={meta.lsi_seq}&viewCls=lsRvsDocInfoR"
+        # AJAX 엔드포인트: rvsBot/rvsTop 구조로 개정이유 포함
+        url = f"https://www.law.go.kr/lsRvsDocInfoR.do?lsiSeq={meta.lsi_seq}"
     elif meta.law_type == "admrul" and meta.admrul_seq:
-        # 행정규칙: 기본 정보 페이지 (개정이유 포함)
-        url = f"https://www.law.go.kr/admRulLsInfoP.do?admRulSeq={meta.admrul_seq}"
+        # 행정규칙: AJAX 개정문 엔드포인트
+        url = f"https://www.law.go.kr/admRulRvsDocInfoR.do?admRulSeq={meta.admrul_seq}"
     else:
         return None
 
@@ -105,13 +106,13 @@ def fetch_old_new_html(meta: LawChangeMeta) -> str | None:
     if meta.law_type == "ls" and meta.lsi_seq:
         # 법령 신구법비교: target=oldAndNew, MST=법령일련번호
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
+            "https://www.law.go.kr/DRF/lawService.do"
             f"?OC={oc}&target=oldAndNew&MST={meta.lsi_seq}&type=XML"
         )
     elif meta.law_type == "admrul" and meta.admrul_seq:
         # 행정규칙 신구법비교: target=admrulOldAndNew, ID=행정규칙일련번호
         url = (
-            "http://www.law.go.kr/DRF/lawService.do"
+            "https://www.law.go.kr/DRF/lawService.do"
             f"?OC={oc}&target=admrulOldAndNew&ID={meta.admrul_seq}&type=XML"
         )
     else:

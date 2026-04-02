@@ -25,6 +25,7 @@ class LawChangeMeta:
     law_number: str | None = None   # 법률 제X호의 X (표시용, lsRvsRsnListP에서 파싱)
     amendment_date_str: str | None = None  # 공포일 표시 문자열 (예: "2023. 10. 24.")
     amendment_type: str | None = None  # 일부개정, 타법개정 등 (표시용)
+    law_type_label: str | None = None  # 법률, 대통령령, XX부령 등 (표시용)
     # 상세 조회용 식별자
     law_type: Literal["ls", "admrul"] | None = None
     lsi_seq: str | None = None       # 법령 일련번호 (lsInfoP용)
@@ -50,6 +51,8 @@ class LawChangeDetail:
     main_change_sections: list[str] = field(default_factory=list)
     combined_reason_and_main_sections: list[str] = field(default_factory=list)
     article_comparisons: list[ArticleComparisonRow] = field(default_factory=list)
+    impact_analysis: str | None = None  # Gemini API 생성 파급효과
+    attachments: list[dict] = field(default_factory=list)  # 입법예고 첨부파일 [{"name":..,"url":..}]
 
     def has_any_content(self) -> bool:
         return any(
