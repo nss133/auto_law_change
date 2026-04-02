@@ -296,18 +296,23 @@ def _detail_to_docx(detail: LawChangeDetail, target_date: date, generator: DocxG
 
     is_combined = bool(detail.combined_reason_and_main_sections)
 
+    _no_content_msg = None
+    if not detail.combined_reason_and_main_sections and not detail.reason_sections and not detail.main_change_sections:
+        source_url = meta.detail_url or ""
+        _no_content_msg = f"법제처 상세 페이지에서 내용을 불러오지 못했습니다.\n원본 확인: {source_url}" if source_url else "법제처 상세 페이지에서 내용을 불러오지 못했습니다."
+
     if is_combined:
         paras = _clean_revision_paras(detail.combined_reason_and_main_sections or [])
         if paras:
             generator.add_section("1", "개정이유 및 주요내용", paras)
         else:
-            generator.add_section("1", "개정이유 및 주요내용", "")
+            generator.add_section("1", "개정이유 및 주요내용", _no_content_msg or "")
     else:
         reason_paras = _clean_revision_paras(detail.reason_sections or [])
         if reason_paras:
             generator.add_section("1", "개정이유", reason_paras)
         else:
-            generator.add_section("1", "개정이유", "")
+            generator.add_section("1", "개정이유", _no_content_msg or "")
 
         main_paras = _clean_revision_paras(detail.main_change_sections or [])
         generator.add_section("2", "주요내용", main_paras or None)
