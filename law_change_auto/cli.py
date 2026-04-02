@@ -23,6 +23,10 @@ from .fetchers.legislation_notice_fetcher import (
     get_legislation_notices_for_monitored,
     fetch_notice_as_detail,
 )
+from .fetchers.briefing_db_fetcher import (
+    get_briefing_notices_for_monitored,
+    fetch_briefing_notice_detail,
+)
 from .ai.gemini_impact import generate_impact_analysis
 from .matching.law_matcher import MatchResult, match_laws
 from .models import LawChangeDetail, LawChangeMeta
@@ -153,6 +157,36 @@ def main(argv: list[str] | None = None) -> None:
             print("[law_change_auto] 입법예고: 해당 일자 진행 중인 건 없음")
     except Exception as e:
         print(f"[law_change_auto] 경고: 입법예고 조회 중 오류 발생 (무시): {e}")
+
+    # 2-3. briefing DB에서 입법예고/규정변경예고 보완 조회
+    try:
+        briefing_metas = get_briefing_notices_for_monitored(
+            monitored_names, active_date=target_date
+        )
+        if briefing_metas:
+            # moleg.go.kr에서 이미 찾은 건과 중복 제거 (제목 정규화 비교)
+            existing_titles = set()
+            for nd in legislation_notice_details:
+                existing_titles.add(re.sub(r"\s+", "", nd.meta.law_name))
+
+            new_count = 0
+            for bm in briefing_metas:
+                norm_title = re.sub(r"\s+", "", bm.law_name)
+                # 이미 moleg에서 가져온 건이면 스킵
+                if any(norm_title in et or et in norm_title for et in existing_titles):
+                    continue
+                try:
+                    bd = fetch_briefing_notice_detail(bm)
+                    if bd:
+                        legislation_notice_details.append(bd)
+                        existing_titles.add(norm_title)
+                        new_count += 1
+                except Exception as e:
+                    print(f"[law_change_auto] briefing DB 상세 조회 실패: {bm.law_name}: {e}")
+            if new_count:
+                print(f"[law_change_auto] briefing DB 보완: {new_count}건 추가")
+    except Exception as e:
+        print(f"[law_change_auto] 경고: briefing DB 조회 중 오류 발생 (무시): {e}")
 
     if law_metas:
         print("[law_change_auto]  └ 법령 변경 목록:")
