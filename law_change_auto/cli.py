@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -36,6 +37,10 @@ from .fetchers.content_fetcher import (
     fetch_old_new_html,
     fetch_revision_html,
     fetch_revision_reason_from_ls_rvs_rsn_list,
+)
+from .fetchers.briefing_db_fetcher import (
+    get_briefing_notices_for_monitored,
+    fetch_briefing_notice_detail,
 )
 from .matching.law_matcher import MatchResult, match_laws
 from .models import LawChangeDetail, LawChangeMeta
@@ -184,6 +189,36 @@ def _collect_details_for_date(
             print("[law_change_auto] 법제처 입법예고: 해당 일자 진행 중인 건 없음")
     except Exception as e:
         print(f"[law_change_auto] 경고: 법제처 입법예고 조회 중 오류 (무시): {e}")
+
+    # 2-3. briefing DB에서 입법예고/규정변경예고 보완 조회
+    try:
+        briefing_metas = get_briefing_notices_for_monitored(
+            monitored_names, active_date=target_date
+        )
+        if briefing_metas:
+            # moleg.go.kr에서 이미 찾은 건과 중복 제거 (제목 정규화 비교)
+            existing_titles = set()
+            for nd in legislation_notice_details:
+                existing_titles.add(re.sub(r"\s+", "", nd.meta.law_name))
+
+            new_count = 0
+            for bm in briefing_metas:
+                norm_title = re.sub(r"\s+", "", bm.law_name)
+                # 이미 moleg에서 가져온 건이면 스킵
+                if any(norm_title in et or et in norm_title for et in existing_titles):
+                    continue
+                try:
+                    bd = fetch_briefing_notice_detail(bm)
+                    if bd:
+                        legislation_notice_details.append(bd)
+                        existing_titles.add(norm_title)
+                        new_count += 1
+                except Exception as e:
+                    print(f"[law_change_auto] briefing DB 상세 조회 실패: {bm.law_name}: {e}")
+            if new_count:
+                print(f"[law_change_auto] briefing DB 보완: {new_count}건 추가")
+    except Exception as e:
+        print(f"[law_change_auto] 경고: briefing DB 조회 중 오류 발생 (무시): {e}")
 
     if law_metas:
         print("[law_change_auto]  └ 법령 변경 목록:")
@@ -405,13 +440,15 @@ def _process_single_date(
             return []
 
     period_line = f"{target_date.year}. {target_date.month}. {target_date.day}."
-    return _write_guides_numbered_with_toc(
+    created = _write_guides_numbered_with_toc(
         details,
         output_dir,
         guide_date=target_date,
         period_line=period_line,
         sort_fallback=target_date,
     )
+    _download_legislation_notice_pdf_attachments(details, output_dir)
+    return created
 
 
 def _process_legislation(
@@ -644,6 +681,35 @@ def _write_guides_numbered_with_toc(
     return created
 
 
+def _download_legislation_notice_pdf_attachments(
+    details: List[LawChangeDetail], output_dir: Path
+) -> None:
+    """입법예고 PDF 법령안 첨부만 안내서 폴더에 저장 (main 브랜치와 동일 필터)."""
+    for detail in details:
+        if detail.meta.category != "입법예고" or not detail.attachments:
+            continue
+        for att in detail.attachments:
+            att_name = att.get("name", "")
+            att_url = att.get("url", "")
+            if not att_name or not att_url:
+                continue
+            if not att_url.lower().endswith(".pdf") and ".pdf" not in att_url.lower():
+                continue
+            if "법령안" not in att_name and "법령 안" not in att_name:
+                continue
+            safe_att = re.sub(r'[\\/:*?"<>|]', "_", att_name)
+            if not safe_att.lower().endswith(".pdf"):
+                safe_att += ".pdf"
+            att_path = output_dir / safe_att
+            try:
+                resp = requests.get(att_url, timeout=30)
+                resp.raise_for_status()
+                att_path.write_bytes(resp.content)
+                print(f"    📎 {safe_att}")
+            except Exception as e:
+                print(f"[law_change_auto] 첨부파일 다운로드 실패: {att_name}: {e}")
+
+
 def _process_comprehensive_period(
     output_dir: Path,
     monitored_laws: List[MonitoredLaw],
@@ -669,13 +735,15 @@ def _process_comprehensive_period(
         f"{date_from.year}. {date_from.month}. {date_from.day}. "
         f"~ {date_to.year}. {date_to.month}. {date_to.day}."
     )
-    return _write_guides_numbered_with_toc(
+    created = _write_guides_numbered_with_toc(
         all_details,
         output_dir,
         guide_date=date_to,
         period_line=period_line,
         sort_fallback=date_to,
     )
+    _download_legislation_notice_pdf_attachments(all_details, output_dir)
+    return created
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -26,6 +26,9 @@ _HEADERS = {
 
 _DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
+# 국회 법안 단계 항목 제외 키워드
+_ASSEMBLY_EXCLUDE_KEYWORDS = ["(대안)", "위원장", "원안가결", "법제사법위원회", "수정가결"]
+
 
 def _parse_date(text: str | None) -> date | None:
     if not text:
@@ -284,6 +287,10 @@ def get_legislation_notices_for_monitored(
 
             # 검색 결과 타이틀에 키워드가 실제로 포함된 것만 (모니터링 대상과 무관한 법령 제외)
             if norm_keyword not in item["title"].replace(" ", ""):
+                continue
+
+            # 국회 법안 단계 항목 제외 (대안, 위원장 제출 등)
+            if any(kw in item["title"] for kw in _ASSEMBLY_EXCLUDE_KEYWORDS):
                 continue
 
             seen_seqs.add(seq)
