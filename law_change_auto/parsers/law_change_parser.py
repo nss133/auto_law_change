@@ -407,13 +407,13 @@ def parse_law_change(
 ) -> LawChangeDetail:
     """제·개정이유/신·구조문 대비표 HTML을 각각 받아 LawChangeDetail로 변환.
 
-    revision_text_from_list가 있으면 lsRvsRsnListP.do에서 추출한 개정이유로 사용하고,
-    없을 때만 revision_html을 파싱한다.
+    개정이유/주요내용 분리 로직:
+      - '◇ 개정이유 및 주요내용' → combined_reason_and_main_sections (통합형)
+      - '◇ 개정이유' + '◇ 주요내용' → reason_sections + main_change_sections (분리형)
     """
     detail = LawChangeDetail(meta=meta)
 
     # 1. 제·개정이유 수집
-    reason_lines: list[str] = []
     if revision_text_from_list:
         # eflaw: ◇ 주요내용 경계로 개정이유/주요내용 분리
         reason_blocks, main_blocks = _split_eflaw_reason_and_main(revision_text_from_list)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from typing import Dict, List
 
@@ -190,13 +191,12 @@ def get_law_changes_for_monitored(
     '관심 대상'만 개별적으로 확인하는 방식이라 사용자 기대와 더 잘 맞는다.
     """
     metas: List[LawChangeMeta] = []
-    ymd = target_date.strftime("%Y%m%d")
 
-    for law in monitored_laws:
+    def _fetch_one(law) -> List[LawChangeMeta]:
         name = law.name.strip()
         if not name:
-            continue
-
+            return []
+        results: List[LawChangeMeta] = []
         try:
             root = _request_law_search(
                 {
@@ -204,11 +204,11 @@ def get_law_changes_for_monitored(
                     "query": name,
                     "display": "50",
                     "page": "1",
-                    "sort": "efdes",  # 시행일자 기준 최신순
+                    "sort": "efdes",
                 }
             )
         except Exception:
-            continue
+            return []
 
         for elem in root.iter():
             law_name = _get_child_text(elem, "법령명")
@@ -239,7 +239,7 @@ def get_law_changes_for_monitored(
                 continue
 
             act_name, promo_no = _ls_stmd_act_and_promulgation(elem)
-            metas.append(
+            results.append(
                 LawChangeMeta(
                     law_name=law_name,
                     category="법령",
@@ -256,6 +256,12 @@ def get_law_changes_for_monitored(
                     promulgation_no=promo_no,
                 )
             )
+        return results
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_fetch_one, law): law for law in monitored_laws}
+        for future in as_completed(futures):
+            metas.extend(future.result())
 
     return metas
 
