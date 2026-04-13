@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # eflaw 응답이 400KB 이상인 경우가 있어 수신 완료를 위해 30초로 설정
 EFLAW_TIMEOUT = 30
 from ..models import LawChangeMeta
-from .national_law_fetcher import _get_oc
+from .law_api_common import _get_oc
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (law_change_auto)",

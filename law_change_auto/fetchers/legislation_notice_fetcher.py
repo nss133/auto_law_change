@@ -14,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from ..models import LawChangeMeta, LawChangeDetail
+from ..parsers.content_splitter import split_reason_and_main
 
 _LIST_URL = "https://www.moleg.go.kr/lawinfo/makingList.mo"
 _DETAIL_URL = "https://www.moleg.go.kr/lawinfo/makingInfo.mo"
@@ -101,16 +102,16 @@ def search_legislation_notices(
             # 소관부처
             ministry = cols[2].get_text(strip=True)
             # 시작일자, 종료일자
-            start_date = _parse_date(cols[3].get_text(strip=True))
-            end_date = _parse_date(cols[4].get_text(strip=True))
+            row_start = _parse_date(cols[3].get_text(strip=True))
+            row_end = _parse_date(cols[4].get_text(strip=True))
 
             results.append({
                 "law_seq": law_seq,
                 "title": title,
                 "law_type_name": law_type_name,
                 "ministry": ministry,
-                "start_date": start_date,
-                "end_date": end_date,
+                "start_date": row_start,
+                "end_date": row_end,
             })
 
     return results
@@ -191,64 +192,12 @@ def fetch_legislation_notice_detail(law_seq: str) -> dict:
     result["full_text"] = full_text
 
     # 개정이유 / 주요내용 분리
-    reason, main_content = _split_notice_content(full_text)
+    reason, main_content = split_reason_and_main(full_text)
     result["reason"] = reason
     result["main_content"] = main_content
 
     return result
 
-
-def _split_notice_content(text: str) -> tuple[str, str]:
-    """입법예고 본문에서 개정이유와 주요내용을 분리한다.
-
-    지원 패턴:
-      - "1. 개정이유" / "2. 주요내용"
-      - "가. 개정이유" / "나. 주요내용"
-      - "개정이유 및 주요내용" (통합형) 후 "가. 개정이유" / "나. 주요내용"
-    """
-    reason = ""
-    main_content = ""
-
-    # 통합 헤더 제거: "개정이유 및 주요내용"
-    text = re.sub(r"(?:Ⅰ\.?\s*)?개정이유\s*및\s*주요내용\s*\n?", "", text, count=1).strip()
-
-    # 여러 형태의 개정이유/주요내용 패턴
-    reason_pat = re.compile(r"(?:1|가)\.\s*개정\s*이유\s*\n?")
-    main_pat = re.compile(r"(?:2|나)\.\s*주요\s*내용\s*\n?")
-
-    reason_match = reason_pat.search(text)
-    main_match = main_pat.search(text)
-
-    if reason_match and main_match and reason_match.start() < main_match.start():
-        reason = text[reason_match.end():main_match.start()].strip()
-        main_content = text[main_match.end():].strip()
-    elif reason_match:
-        reason = text[reason_match.end():].strip()
-    elif main_match:
-        reason = text[:main_match.start()].strip()
-        main_content = text[main_match.end():].strip()
-    else:
-        reason = text.strip()
-
-    # 불필요 후미 내용 제거 (의견제출, 첨부파일 영역 등)
-    _TAIL_PATTERNS = [
-        re.compile(r"\n?\s*(?:\d+|다)\.\s*의견\s*제출"),
-        re.compile(r"\n?\s*법령안\s*\n"),
-        re.compile(r"\n?\s*규제영향분석서\s*\n"),
-        re.compile(r"\n?\s*참고[·\s]*설명자료"),
-    ]
-    for text_ref in ("main_content", "reason"):
-        val = main_content if text_ref == "main_content" else reason
-        for pat in _TAIL_PATTERNS:
-            m = pat.search(val)
-            if m:
-                val = val[:m.start()].strip()
-        if text_ref == "main_content":
-            main_content = val
-        else:
-            reason = val
-
-    return reason, main_content
 
 
 def get_legislation_notices_for_monitored(
@@ -361,3 +310,144 @@ def fetch_notice_as_detail(meta: LawChangeMeta) -> LawChangeDetail | None:
             main_change_sections=[],
             attachments=attachments,
         )
+
+
+def _moleg_search_keyword_for_segment(segment_law_name: str) -> str:
+    """FSC 분할 제목에서 moleg keyWord용 문자열."""
+    compact = re.sub(r"\s+", "", (segment_law_name or "").strip())
+    if not compact:
+        return ""
+    # 공통 접두가 있으면 검색 적중률 향상
+    if "특정금융거래정보" in compact:
+        return "특정금융거래정보"
+    return compact[:14] if len(compact) >= 14 else compact
+
+
+def _collect_moleg_candidates(
+    keyword: str,
+    fsc_announcement_date: date,
+) -> List[dict]:
+    """예고 시작일·기간 필터를 만족하는 검색 결과를 모은다."""
+    seen: set[str] = set()
+    out: List[dict] = []
+
+    def _add_from_items(items: List[dict]) -> None:
+        for item in items:
+            seq = item.get("law_seq")
+            if not seq or seq in seen:
+                continue
+            sd, ed = item.get("start_date"), item.get("end_date")
+            if sd and ed and not (sd <= fsc_announcement_date <= ed):
+                continue
+            seen.add(seq)
+            out.append(item)
+
+    try:
+        items = search_legislation_notices(
+            keyword,
+            max_pages=3,
+            start_date=fsc_announcement_date,
+            end_date=fsc_announcement_date,
+        )
+        _add_from_items(items)
+    except Exception:
+        pass
+
+    if not out:
+        try:
+            items = search_legislation_notices(keyword, max_pages=3)
+            _add_from_items(items)
+        except Exception:
+            pass
+
+    return out
+
+
+def find_moleg_meta_for_fsc_segment(
+    segment_law_name: str,
+    fsc_announcement_date: date | None,
+    *,
+    min_score: float = 0.55,
+) -> LawChangeMeta | None:
+    """FSC 분할 세그먼트 제목·금융위 예고일에 대응하는 moleg 입법예고 1건을 찾는다."""
+    from Levenshtein import ratio as levenshtein_ratio
+
+    from ..matching.law_matcher import _normalize_name
+
+    if not segment_law_name or not fsc_announcement_date:
+        return None
+
+    keyword = _moleg_search_keyword_for_segment(segment_law_name)
+    if len(keyword) < 4:
+        return None
+
+    candidates = _collect_moleg_candidates(keyword, fsc_announcement_date)
+    if not candidates:
+        return None
+
+    norm_seg = _normalize_name(segment_law_name)
+    best: dict | None = None
+    best_score = 0.0
+
+    for item in candidates:
+        title = item.get("title") or ""
+        if any(kw in title for kw in _ASSEMBLY_EXCLUDE_KEYWORDS):
+            continue
+        norm_t = _normalize_name(title)
+        if not norm_t:
+            continue
+        s = levenshtein_ratio(norm_seg, norm_t)
+        if norm_seg in norm_t or norm_t in norm_seg:
+            s = max(s, 0.72)
+        if s > best_score:
+            best_score = s
+            best = item
+
+    if best is None or best_score < min_score:
+        return None
+
+    seq = best["law_seq"]
+    return LawChangeMeta(
+        law_name=best["title"],
+        category="입법예고",
+        change_type="입법예고",
+        announcement_date=best.get("start_date"),
+        effective_date=best.get("end_date"),
+        source=f"moleg.go.kr:lawSeq={seq}",
+        detail_url=f"{_DETAIL_URL}?lawSeq={seq}&lawType=TYPE5&mid=a10104010000",
+        law_id=seq,
+        law_type_label=best.get("law_type_name"),
+    )
+
+
+def build_legislation_detail_from_moleg_for_fsc_split(
+    fsc_segment_meta: LawChangeMeta,
+) -> LawChangeDetail | None:
+    """FSC 통합 공지 분할 건(`law_id`에 `#s` 포함)만: moleg 상세로 안내서용 LawChangeDetail을 만든다.
+
+    매칭 실패 시 None — 호출부에서 FSC 본문·PDF 경로로 폴백.
+    """
+    lid = fsc_segment_meta.law_id or ""
+    if "#s" not in lid:
+        return None
+
+    moleg_meta = find_moleg_meta_for_fsc_segment(
+        fsc_segment_meta.law_name,
+        fsc_segment_meta.announcement_date,
+    )
+    if not moleg_meta:
+        return None
+
+    detail = fetch_notice_as_detail(moleg_meta)
+    if not detail:
+        return None
+
+    # FSC에서 구분한 입법예고/규정변경예고·예고일(게시)은 유지, 본문·첨부는 moleg 기준
+    detail.meta.change_type = fsc_segment_meta.change_type
+    detail.meta.announcement_date = fsc_segment_meta.announcement_date or detail.meta.announcement_date
+    detail.meta.source = f"{detail.meta.source};fsc_crosscheck={lid}"
+    print(
+        f"[law_change_auto] FSC 통합 공지 → moleg 상세 사용: {fsc_segment_meta.law_name[:40]}...",
+        flush=True,
+    )
+    return detail

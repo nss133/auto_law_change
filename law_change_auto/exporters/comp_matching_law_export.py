@@ -71,6 +71,45 @@ def _clean_text(s: str) -> str:
     return _ws_re.sub(" ", s)
 
 
+# lawService JSON: 본문이 조문내용이 아니라 항·호·목 트리에만 있는 경우가 많음
+_STRUCT_KEYS = frozenset({"항", "호", "목", "항단위", "호단위", "목단위"})
+_TEXT_KEYS = ("항내용", "호내용", "목내용")
+
+
+def _walk_law_hang_ho_tree(node: Any, parts: list[str]) -> None:
+    """항/호/목 중첩 구조에서 텍스트만 수집 (조문내용 제외)."""
+    if node is None:
+        return
+    if isinstance(node, list):
+        for el in node:
+            _walk_law_hang_ho_tree(el, parts)
+        return
+    if not isinstance(node, dict):
+        return
+    for tk in _TEXT_KEYS:
+        v = node.get(tk)
+        if isinstance(v, str) and v.strip():
+            parts.append(_clean_text(v))
+    for sk in _STRUCT_KEYS:
+        if sk in node:
+            _walk_law_hang_ho_tree(node[sk], parts)
+
+
+def _full_article_body_from_api_item(item: dict[str, Any]) -> str:
+    """조문단위 dict에서 조문내용 + 항·호·목 트리 본문을 한 문자열로 합친다."""
+    base = _clean_text(str(item.get("조문내용", "") or "").strip())
+    nested_parts: list[str] = []
+    for root_key in ("항", "호", "목"):
+        if root_key in item:
+            _walk_law_hang_ho_tree(item[root_key], nested_parts)
+    nested = _clean_text(" ".join(nested_parts))
+    if base and nested:
+        return _clean_text(f"{base} {nested}")
+    if base:
+        return base
+    return nested
+
+
 def law_api_payload_to_comp_matching_rows(
     api_payload: dict[str, Any],
     *,
@@ -108,8 +147,7 @@ def law_api_payload_to_comp_matching_rows(
             item.get("조문가지번호", item.get("조가지번호", ""))
         ).strip()
         title = str(item.get("조문제목", "") or "").strip()
-        content = str(item.get("조문내용", "") or "").strip()
-        content = _clean_text(content)
+        content = _full_article_body_from_api_item(item)
         if not content and not num:
             continue
 
@@ -154,6 +192,9 @@ def write_comp_matching_csv(rows: list[dict[str, str]], path: str | Path) -> Pat
 def write_comp_matching_csv_excel(rows: list[dict[str, str]], path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        pd.DataFrame(columns=["law_name", "article_ref", "text"]).to_excel(path, index=False)
+        return path
     pd.DataFrame(rows).to_excel(path, index=False)
     return path
 

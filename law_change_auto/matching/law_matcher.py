@@ -67,3 +67,36 @@ def match_laws(
 
     return results
 
+
+def augment_fsc_legislation_matches(
+    monitored_laws: List[MonitoredLaw],
+    in_range: List[LawChangeMeta],
+    matches: List[MatchResult],
+    *,
+    min_norm_len: int = 12,
+) -> List[MatchResult]:
+    """금융위 통합 공지(한 줄에 시행령·규정 등 복수 건)처럼 전체 제목만으로는 유사도가 낮을 때 보강.
+
+    정규화한 모니터링 법령명이 공지 제목(정규화)에 **부분 문자열**로 들어가면 매칭에 포함한다.
+    """
+    if not in_range:
+        return matches
+    matched_urls = {m.meta.detail_url for m in matches if m.meta.detail_url}
+    out: List[MatchResult] = list(matches)
+
+    for meta in in_range:
+        url = meta.detail_url
+        if not url or url in matched_urls:
+            continue
+        norm_title = _normalize_name(meta.law_name)
+        for law in monitored_laws:
+            nn = _normalize_name(law.name)
+            if len(nn) < min_norm_len:
+                continue
+            if nn in norm_title:
+                out.append(MatchResult(meta=meta, monitored=law, score=0.52))
+                matched_urls.add(url)
+                break
+
+    return out
+

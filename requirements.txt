@@ -8,3 +8,4 @@ openpyxl
 python-Levenshtein
 pymupdf
 pdfplumber
+pytest

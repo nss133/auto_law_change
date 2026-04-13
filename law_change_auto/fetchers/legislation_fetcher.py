@@ -28,13 +28,35 @@ def _is_regulation_gosi_label(label: str) -> bool:
     return "일부개정고시안" in label or "개정고시안" in label
 
 
+def _is_legislation_decree_pdf_label(label: str) -> bool:
+    """입법예고(시행령·시행규칙 등) 첨부 PDF. 규정 고시안·이유서·공고 패키지 등 제외."""
+    if "고시안" in label:
+        return False
+    exclude = ("조문별", "이유서", "규제영향", "미첨부", "확인서", "사전예고기간")
+    if any(x in label for x in exclude):
+        return False
+    # FSC 통합 공고 페이지의 공고문 패키지 PDF (실제 령안은 '개정안] … 일부개정령안' 등 별도 링크)
+    if "공고 제" in label and "입법예고" in label:
+        return False
+    return (
+        "일부개정령안" in label
+        or "전부개정령안" in label
+        or "제정령안" in label
+    )
+
+
 def download_and_save_gosi_pdfs(
     detail_url: str,
     output_dir: Path,
     session: Optional[requests.Session] = None,
+    *,
+    change_type: str = "규정변경예고",
 ) -> List[tuple[str, str]]:
-    """규정 일부/개정고시안 첨부 PDF를 다운로드해 output_dir에 저장하고 (라벨, 저장경로) 반환.
-    공고문·조문별이유서·규제영향분석서 등은 제외."""
+    """FSC 상세의 첨부 PDF를 유형에 맞게 저장하고 (라벨, 저장경로) 반환.
+
+    - 규정변경예고: 규정 일부/개정고시안 (신구조문 대비표 위주)
+    - 입법예고: 일부·전부개정령안, 제정령안 (규정 고시안 제외)
+    """
     if session is None:
         session = requests.Session()
         session.headers.update(HEADERS)
@@ -44,14 +66,21 @@ def download_and_save_gosi_pdfs(
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     for label, url in pdfs:
-        if not _is_regulation_gosi_label(label):
+        if change_type == "규정변경예고":
+            if not _is_regulation_gosi_label(label):
+                continue
+        elif change_type == "입법예고":
+            if not _is_legislation_decree_pdf_label(label):
+                continue
+        else:
             continue
         data = download_pdf(url, session=session)
         if not data or data[:4] != b"%PDF":
             continue
         # 파일명: 라벨에서 .pdf 앞부분만 사용, 특수문자 제거
         name = re.sub(r"[^\w\s\-\.가-힣]", "", label)
-        name = re.sub(r"\s+", "_", name).strip("_") or "규정고시안"
+        fallback = "규정고시안" if change_type == "규정변경예고" else "개정령안"
+        name = re.sub(r"\s+", "_", name).strip("_") or fallback
         if not name.lower().endswith(".pdf"):
             name += ".pdf"
         path = output_dir / name
@@ -148,6 +177,61 @@ def fetch_fsc_legislation_list(max_items: int = 50) -> List[LawChangeMeta]:
             )
         )
     return metas
+
+
+def _clean_fsc_segment_title(inner: str) -> str:
+    """「」 안쪽 문자열을 법령 표시용 제목으로 정리."""
+    t = (inner or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def expand_fsc_combined_notice_metas(meta: LawChangeMeta) -> List[LawChangeMeta]:
+    """FSC 통합 공지(한 줄에 시행령 입법예고 + 규정 규정변경예고 등)를 「…」/｢…｣ 단위로 나눈다.
+
+    분해되지 않으면 ``[meta]`` 그대로 반환한다.
+    """
+    title = meta.law_name or ""
+    segments: List[tuple[str, str]] = []
+
+    for open_b, close_b in (("「", "」"), ("｢", "｣")):
+        pat = (
+            re.escape(open_b)
+            + r"([^"
+            + re.escape(close_b)
+            + r"]+)"
+            + re.escape(close_b)
+            + r"\s*(입법예고|규정변경예고)"
+        )
+        for m in re.finditer(pat, title):
+            inner = (m.group(1) or "").strip()
+            ctype = m.group(2)
+            if inner and ctype in ("입법예고", "규정변경예고"):
+                segments.append((inner, ctype))
+        if segments:
+            break
+
+    if not segments:
+        return [meta]
+
+    base_id = meta.law_id or ""
+    out: List[LawChangeMeta] = []
+    for i, (inner, ctype) in enumerate(segments):
+        law_id = f"{base_id}#s{i}" if len(segments) > 1 and base_id else base_id
+        out.append(
+            LawChangeMeta(
+                law_name=_clean_fsc_segment_title(inner),
+                category="입법예고",
+                change_type=ctype,
+                announcement_date=meta.announcement_date,
+                effective_date=meta.effective_date,
+                source=meta.source,
+                detail_url=meta.detail_url,
+                law_id=law_id or None,
+                law_type=meta.law_type,
+            )
+        )
+    return out
 
 
 def fetch_notice_body_text(detail_url: str) -> str:

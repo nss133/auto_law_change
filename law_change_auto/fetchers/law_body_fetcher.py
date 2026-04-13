@@ -5,7 +5,7 @@ from typing import Any
 
 import requests
 
-from .national_law_fetcher import (
+from .law_api_common import (
     _extract_lsi_seq,
     _get_child_text,
     _get_oc,

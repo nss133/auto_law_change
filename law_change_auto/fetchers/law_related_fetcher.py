@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from .national_law_fetcher import _get_oc
+from .law_api_common import _get_oc
 
 LAW_SEARCH_URL = "https://www.law.go.kr/DRF/lawSearch.do"
 
