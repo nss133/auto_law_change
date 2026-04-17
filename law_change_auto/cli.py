@@ -275,7 +275,8 @@ def _process_comprehensive_period(
     all_details.extend(legis_details)
 
     # 중복 제거: collect_details_for_range와 collect_legislation_details 양쪽에서 FSC를 수집하므로
-    seen_seqs: Set[str] = set()
+    # 중복 발견 시 comparison_pdf_paths가 있는 버전의 PDF 정보를 기존 버전에 보완(머지)
+    seen_seqs: dict[str, int] = {}  # seq_key → deduped index
     deduped: List[LawChangeDetail] = []
     for d in all_details:
         seq_key = (
@@ -285,8 +286,11 @@ def _process_comprehensive_period(
             or f"{d.meta.law_name}_{d.meta.announcement_date}"
         )
         if seq_key in seen_seqs:
+            # 이미 저장된 버전에 PDF paths 보완
+            if d.comparison_pdf_paths and not deduped[seen_seqs[seq_key]].comparison_pdf_paths:
+                deduped[seen_seqs[seq_key]].comparison_pdf_paths = d.comparison_pdf_paths
             continue
-        seen_seqs.add(seq_key)
+        seen_seqs[seq_key] = len(deduped)
         deduped.append(d)
     if len(deduped) < len(all_details):
         print(f"[law_change_auto] 중복 제거: {len(all_details)}건 → {len(deduped)}건")
