@@ -274,6 +274,24 @@ def _process_comprehensive_period(
     )
     all_details.extend(legis_details)
 
+    # 중복 제거: collect_details_for_range와 collect_legislation_details 양쪽에서 FSC를 수집하므로
+    seen_seqs: Set[str] = set()
+    deduped: List[LawChangeDetail] = []
+    for d in all_details:
+        seq_key = (
+            d.meta.lsi_seq
+            or d.meta.admrul_seq
+            or d.meta.law_id
+            or f"{d.meta.law_name}_{d.meta.announcement_date}"
+        )
+        if seq_key in seen_seqs:
+            continue
+        seen_seqs.add(seq_key)
+        deduped.append(d)
+    if len(deduped) < len(all_details):
+        print(f"[law_change_auto] 중복 제거: {len(all_details)}건 → {len(deduped)}건")
+    all_details = deduped
+
     if not all_details:
         print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
         return []
