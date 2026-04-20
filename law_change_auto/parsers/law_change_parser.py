@@ -29,6 +29,7 @@ def _parse_ls_revision(soup: BeautifulSoup) -> list[str]:
             break
         if hasattr(sibling, "get_text"):
             text = sibling.get_text(separator="\n", strip=True)
+            text = re.sub(r"\s*<법제처 제공>\s*", " ", text).strip()
             if text and text not in ("【제정·개정이유】",):
                 results.append(text)
 

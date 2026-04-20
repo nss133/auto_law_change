@@ -399,6 +399,10 @@ def _detail_to_docx(
             new_seg = row.new_segments or [((row.new_text or "").strip(), "normal")]
             comparison_table.append((old_seg, new_seg))
         generator.add_comparison_table(comparison_table)
+    else:
+        generator.add_main_contents(
+            paragraphs=["※ 신구조문 대비표를 확인할 수 없음 (법제처 미제공 또는 해당 개정 유형 미지원)."]
+        )
 
 
 def guide_display_title(meta: LawChangeMeta) -> str:

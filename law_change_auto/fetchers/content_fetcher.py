@@ -31,6 +31,7 @@ def _extract_reason_from_eflaw_response(resp_text: str) -> tuple[str, dict | Non
                 reason_tag = tag
                 break
         reason_text = reason_tag.get_text(strip=True) if reason_tag else ""
+        reason_text = re.sub(r"\s*<법제처 제공>\s*", " ", reason_text).strip()
 
         metadata = None
         law_num = soup.find(lambda t: t.name and "공포번호" in (t.name or ""))
@@ -133,6 +134,10 @@ def fetch_old_new_html(meta: LawChangeMeta) -> str | None:
             f"?OC={oc}&target=admrulOldAndNew&ID={meta.admrul_seq}&type=XML"
         )
     else:
+        print(
+            f"[law_change_auto] 신구대비표 API 호출 스킵: {meta.law_name}"
+            f" (law_type={meta.law_type}, lsi_seq={meta.lsi_seq}, admrul_seq={getattr(meta, 'admrul_seq', None)})"
+        )
         return None
 
     try:

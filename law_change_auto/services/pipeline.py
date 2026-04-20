@@ -214,6 +214,8 @@ def collect_details_for_date(
             meta, revision_html, old_new_xml, revision_text_from_list=revision_text_from_list
         )
         details.append(detail)
+        if old_new_xml and not detail.article_comparisons:
+            print(f"[law_change_auto] 신구대비표 API 응답 있으나 파싱 결과 0행: {meta.law_name} lsi={meta.lsi_seq}")
 
     if law_filter:
         norm_filter = law_filter.replace(" ", "")
