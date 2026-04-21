@@ -20,6 +20,7 @@ except Exception:
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_MODEL = "gemini-2.5-flash"
 MAX_INPUT_CHARS = 1500
+INTER_CALL_DELAY = 8  # 무료 티어 10 RPM 대응: 호출 간 최소 대기(초)
 MAX_OUTPUT_TOKENS = 512
 
 
@@ -42,6 +43,9 @@ def fetch_impact_text(
     api_key = _get_api_key()
     if not api_key:
         return None
+
+    # 무료 티어 10 RPM 제한 대응: 호출 전 대기
+    time.sleep(INTER_CALL_DELAY)
 
     reason_text = " ".join(reason_paras).strip() if reason_paras else ""
     main_text = " ".join(main_paras).strip() if main_paras else ""
