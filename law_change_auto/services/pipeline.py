@@ -223,7 +223,7 @@ def collect_details_for_date(
         revision_text_from_list: str | None = None
         old_new_xml: str | None = None
 
-        if meta.law_type == "ls" and meta.law_id and meta.effective_date:
+        if meta.law_type == "ls" and (meta.law_id or meta.lsi_seq) and meta.effective_date:
             date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
             ann_date_str = (
                 f"{meta.announcement_date.year}. {meta.announcement_date.month}. {meta.announcement_date.day}."
@@ -396,7 +396,7 @@ def _fetch_detail_for_meta(
     revision_html: str | None = None
     revision_text_from_list: str | None = None
     old_new_xml: str | None = None
-    if meta.law_type == "ls" and meta.law_id and meta.effective_date:
+    if meta.law_type == "ls" and (meta.law_id or meta.lsi_seq) and meta.effective_date:
         date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
         ann_date_str = (
             f"{meta.announcement_date.year}. {meta.announcement_date.month}. {meta.announcement_date.day}."
