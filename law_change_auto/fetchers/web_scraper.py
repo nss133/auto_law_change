@@ -277,6 +277,148 @@ def scrape_recent_promulgated_laws(
     return metas
 
 
+# ── calendarInfoR.do 달력 API ──────────────────────────────────────
+
+_CALENDAR_URL = "https://law.go.kr/LSW/calendarInfoR.do"
+
+# onclick="javascript:lsViewLsHst3('lsi_seq','공포일','공포번호','시행일','Y')"
+_CALENDAR_ONCLICK_RE = re.compile(
+    r"lsViewLsHst3\(\s*'(\d+)'\s*,\s*'(\d+)'\s*,\s*'(\d+)'\s*,\s*'(\d+)'\s*,"
+)
+
+_CALENDAR_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+}
+
+
+def _parse_calendar_row(
+    tr: "BeautifulSoup",
+    fsort_label: str,
+) -> LawChangeMeta | None:
+    """calendarInfoR.do 테이블의 <tr> 한 행을 LawChangeMeta로 파싱.
+
+    파싱 불가 시 None을 반환한다.
+    """
+    tds = tr.find_all("td")
+    if len(tds) < 5:
+        return None
+
+    # 컬럼: 법령명 | 구분 | 법령종류 | 공포번호 | 소관부처
+    law_name = tds[0].get_text(strip=True)
+    change_type = tds[1].get_text(strip=True) or fsort_label
+    act_type_name = tds[2].get_text(strip=True)
+    promulgation_no_text = tds[3].get_text(strip=True)  # "제21533호" 형태
+    # 소관부처는 수집하지 않음
+
+    if not law_name:
+        return None
+
+    # onclick에서 lsi_seq, 공포일, 공포번호, 시행일 추출
+    a_tag = tds[0].find("a")
+    onclick = a_tag.get("onclick", "") if a_tag else ""
+    onclick_m = _CALENDAR_ONCLICK_RE.search(onclick)
+
+    lsi_seq: str | None = None
+    announcement_date: date | None = None
+    effective_date: date | None = None
+    law_number: str | None = None
+
+    if onclick_m:
+        lsi_seq = onclick_m.group(1)
+        anc_str = onclick_m.group(2)  # YYYYMMDD
+        num_str = onclick_m.group(3)  # 공포번호 숫자 (leading zero 포함 가능)
+        eff_str = onclick_m.group(4)  # YYYYMMDD
+
+        law_number = str(int(num_str))  # leading zero 제거
+
+        try:
+            announcement_date = datetime.strptime(anc_str, "%Y%m%d").date()
+        except ValueError:
+            pass
+        try:
+            effective_date = datetime.strptime(eff_str, "%Y%m%d").date()
+        except ValueError:
+            pass
+
+    return LawChangeMeta(
+        law_name=law_name,
+        category="법령",
+        change_type=change_type or "기타",
+        announcement_date=announcement_date,
+        effective_date=effective_date,
+        source="law.go.kr:calendarInfoR",
+        law_type="ls",
+        lsi_seq=lsi_seq,
+        law_number=law_number,
+        act_type_name=act_type_name or None,
+        promulgation_no=law_number,
+    )
+
+
+def fetch_calendar_laws(
+    target_date: date,
+    fsort_codes: list[str] | None = None,
+) -> List[LawChangeMeta]:
+    """law.go.kr 달력 API(calendarInfoR.do)에서 법령 목록을 수집한다.
+
+    Args:
+        target_date: 조회 대상 날짜.
+        fsort_codes: fsort 코드 리스트. 기본값 ['100', '200'] (시행+공포).
+            100=시행법령, 200=공포법령, 300=폐지.
+
+    Returns:
+        LawChangeMeta 리스트 (lsi_seq 기준 중복 제거 완료).
+    """
+    if fsort_codes is None:
+        fsort_codes = ["100", "200"]
+
+    fsort_labels = {"100": "시행", "200": "공포", "300": "폐지"}
+    cal_dt = target_date.strftime("%Y%m%d")
+    seen_seqs: set[str] = set()
+    metas: List[LawChangeMeta] = []
+
+    for fsort in fsort_codes:
+        label = fsort_labels.get(fsort, "기타")
+        try:
+            resp = requests.get(
+                _CALENDAR_URL,
+                params={"calDt": cal_dt, "fsort": fsort},
+                headers=_CALENDAR_HEADERS,
+                timeout=15,
+            )
+            resp.encoding = "utf-8"
+            if resp.status_code != 200:
+                print(
+                    f"[law_change_auto] calendarInfoR 응답 오류: "
+                    f"fsort={fsort}, status={resp.status_code}"
+                )
+                continue
+        except (requests.ConnectionError, requests.Timeout) as e:
+            print(f"[law_change_auto] calendarInfoR 요청 실패: fsort={fsort}, {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.find_all("tr")
+
+        for tr in rows:
+            try:
+                meta = _parse_calendar_row(tr, label)
+            except Exception as e:
+                print(f"[law_change_auto] calendarInfoR 행 파싱 실패 (skip): {e}")
+                continue
+            if meta is None:
+                continue
+            # lsi_seq 기준 중복 제거
+            if meta.lsi_seq:
+                if meta.lsi_seq in seen_seqs:
+                    continue
+                seen_seqs.add(meta.lsi_seq)
+            metas.append(meta)
+
+    return metas
+
+
 def _normalize_for_dedup(name: str) -> str:
     """중복 제거용 법령명 정규화."""
     if not name:

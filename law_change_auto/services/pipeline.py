@@ -28,7 +28,11 @@ from ..fetchers.national_law_fetcher import (
     get_recent_admin_rule_changes_range,
     get_recent_law_changes_range,
 )
-from ..fetchers.web_scraper import cross_check_and_merge, scrape_recent_promulgated_laws
+from ..fetchers.web_scraper import (
+    cross_check_and_merge,
+    fetch_calendar_laws,
+    scrape_recent_promulgated_laws,
+)
 from ..fetchers.content_fetcher import (
     fetch_old_new_html,
     fetch_revision_html,
@@ -72,6 +76,30 @@ def collect_details_for_date(
     print(f"[law_change_auto] 수집된 원천 변경 건수: {len(all_metas)}")
 
     if not no_web_check:
+        # 2-1a. 달력 API (calendarInfoR) — lsi_seq 포함, 우선순위 높음
+        try:
+            cal_metas = fetch_calendar_laws(target_date)
+            if cal_metas:
+                cal_missing = cross_check_and_merge(all_metas, cal_metas)
+                if cal_missing:
+                    print(
+                        f"[law_change_auto] 달력API 교차검증: API에 누락된 {len(cal_missing)}건 추가 발견"
+                    )
+                    for m in cal_missing:
+                        anc = m.announcement_date.isoformat() if m.announcement_date else "-"
+                        eff = m.effective_date.isoformat() if m.effective_date else "-"
+                        print(f"    + {m.law_name} (공포={anc}, 시행={eff}, src={m.source})")
+                    all_metas.extend(cal_missing)
+                else:
+                    print(
+                        f"[law_change_auto] 달력API 교차검증: {len(cal_metas)}건 조회, API 누락건 없음"
+                    )
+            else:
+                print("[law_change_auto] 달력API 교차검증: 해당 일자 공포/시행 법령 0건")
+        except Exception as e:
+            print(f"[law_change_auto] 경고: 달력API 교차검증 중 오류 발생 (무시): {e}")
+
+        # 2-1b. 기존 웹 스크래핑 (lsScListR) — fallback
         try:
             web_metas = scrape_recent_promulgated_laws(target_date)
             if web_metas:
@@ -388,6 +416,34 @@ def collect_details_for_range(
         print(f"[law_change_auto] 경고: Open API 호출 중 오류 발생: {e}")
 
     all_metas = [*law_metas, *admin_rule_metas]
+
+    # 달력 API(calendarInfoR)로 날짜별 교차검증 — lsi_seq 포함으로 매칭 정확도 향상
+    try:
+        cal_all: List[LawChangeMeta] = []
+        cal_seen: set[str] = set()
+        current = date_from
+        one_day = dt.timedelta(days=1)
+        while current <= date_to:
+            day_metas = fetch_calendar_laws(current)
+            for m in day_metas:
+                if m.lsi_seq and m.lsi_seq not in cal_seen:
+                    cal_seen.add(m.lsi_seq)
+                    cal_all.append(m)
+            current += one_day
+        if cal_all:
+            cal_missing = cross_check_and_merge(all_metas, cal_all)
+            if cal_missing:
+                print(
+                    f"[law_change_auto] 달력API 교차검증(기간): API에 누락된 {len(cal_missing)}건 추가"
+                )
+                all_metas.extend(cal_missing)
+            else:
+                print(
+                    f"[law_change_auto] 달력API 교차검증(기간): {len(cal_all)}건 조회, 누락건 없음"
+                )
+    except Exception as e:
+        print(f"[law_change_auto] 경고: 달력API 교차검증(기간) 중 오류 (무시): {e}")
+
     matches = match_laws(monitored_laws, all_metas, threshold=0.8)
     if law_filter:
         matches = [m for m in matches if law_filter in m.meta.law_name]
