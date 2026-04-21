@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -69,41 +70,63 @@ def fetch_impact_text(
 """
 
     url = f"{GEMINI_API_BASE}/{DEFAULT_MODEL}:generateContent"
-    try:
-        resp = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            params={"key": api_key},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
-                    "temperature": 0.2,
-                    "thinkingConfig": {"thinkingBudget": 0},
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                params={"key": api_key},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                        "temperature": 0.2,
+                        "thinkingConfig": {"thinkingBudget": 0},
+                    },
                 },
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return None
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        if not parts:
-            return None
-        texts = []
-        for part in parts:
-            if part.get("thought") is True:
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            parts = (candidates[0].get("content") or {}).get("parts") or []
+            if not parts:
+                return None
+            texts = []
+            for part in parts:
+                if part.get("thought") is True:
+                    continue
+                t = (part.get("text") or "").strip()
+                if t:
+                    texts.append(t)
+            text = " ".join(texts).strip() if texts else ""
+            for prefix in ("## 파급효과", "##파급효과", "파급효과\n", "파급효과 "):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].strip()
+                    break
+            return text if len(text) >= 12 else None
+        except requests.exceptions.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status == 429:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                print(f"[Gemini] {law_name}: 429 Rate Limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                time.sleep(wait)
                 continue
-            t = (part.get("text") or "").strip()
-            if t:
-                texts.append(t)
-        text = " ".join(texts).strip() if texts else ""
-        for prefix in ("## 파급효과", "##파급효과", "파급효과\n", "파급효과 "):
-            if text.startswith(prefix):
-                text = text[len(prefix) :].strip()
-                break
-        return text if len(text) >= 12 else None
-    except Exception:
-        return None
+            print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
+            return None
+        except Exception as e:
+            # ResourceExhausted (google.api_core) 등 문자열 매칭으로 429 감지
+            err_str = str(e)
+            if "429" in err_str or "ResourceExhausted" in type(e).__name__:
+                wait = 2 ** attempt
+                print(f"[Gemini] {law_name}: {type(e).__name__} (rate limit), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
+            return None
+    # 모든 재시도 실패
+    print(f"[Gemini] {law_name}: {max_retries}회 재시도 모두 실패")
+    return None

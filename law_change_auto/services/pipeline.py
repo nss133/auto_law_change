@@ -48,6 +48,24 @@ from ..parsers.law_change_parser import parse_law_change
 from ..parsers.legislation_parser import parse_reason_main_from_notice_body
 
 
+def _is_valid_revision_html(html: str | None) -> bool:
+    """개정이유 HTML 유효성 검사. 에러 페이지나 빈 응답이면 False."""
+    if not html:
+        return False
+    stripped = html.strip()
+    # 본문이 너무 짧으면 에러 페이지로 간주 (정상 개정이유는 최소 수백 자)
+    if len(stripped) < 100:
+        return False
+    lower = stripped.lower()
+    # 전체가 <html 태그로 시작하면 에러 페이지 (정상 응답은 개정이유 fragment)
+    if lower.startswith("<!doctype") or lower.startswith("<html"):
+        # 정상 개정이유 콘텐츠(rvsConScroll, contentBody)가 포함돼 있으면 유효
+        if "rvsconscroll" in lower or "contentbody" in lower:
+            return True
+        return False
+    return True
+
+
 def collect_details_for_date(
     target_date: dt.date,
     monitored_laws: List[MonitoredLaw],
@@ -207,10 +225,15 @@ def collect_details_for_date(
 
         if meta.law_type == "ls" and meta.law_id and meta.effective_date:
             date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
+            ann_date_str = (
+                f"{meta.announcement_date.year}. {meta.announcement_date.month}. {meta.announcement_date.day}."
+                if meta.announcement_date else None
+            )
             chr_cls_cd = meta.chr_cls_cd or "010001"
             try:
                 text, display_meta = fetch_revision_reason_from_ls_rvs_rsn_list(
-                    meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq
+                    meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq,
+                    announcement_date_str=ann_date_str,
                 )
                 if text:
                     revision_text_from_list = text
@@ -227,6 +250,10 @@ def collect_details_for_date(
         if not revision_text_from_list:
             try:
                 revision_html = fetch_revision_html(meta)
+                if not _is_valid_revision_html(revision_html):
+                    if revision_html:
+                        print(f"[law_change_auto] 개정이유 HTML 유효성 검사 실패 (에러 페이지): {meta.law_name}")
+                    revision_html = None
             except Exception as e:
                 print(f"[law_change_auto] 개정이유 조회 실패: {meta.law_name}: {e}")
 
@@ -371,10 +398,15 @@ def _fetch_detail_for_meta(
     old_new_xml: str | None = None
     if meta.law_type == "ls" and meta.law_id and meta.effective_date:
         date_str = f"{meta.effective_date.year}. {meta.effective_date.month}. {meta.effective_date.day}."
+        ann_date_str = (
+            f"{meta.announcement_date.year}. {meta.announcement_date.month}. {meta.announcement_date.day}."
+            if meta.announcement_date else None
+        )
         chr_cls_cd = meta.chr_cls_cd or "010001"
         try:
             text, display_meta = fetch_revision_reason_from_ls_rvs_rsn_list(
-                meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq
+                meta.law_id, chr_cls_cd, date_str, lsi_seq=meta.lsi_seq,
+                announcement_date_str=ann_date_str,
             )
             if text:
                 revision_text_from_list = text
@@ -390,6 +422,8 @@ def _fetch_detail_for_meta(
     if not revision_text_from_list:
         try:
             revision_html = fetch_revision_html(meta)
+            if not _is_valid_revision_html(revision_html):
+                revision_html = None
         except Exception:
             pass
     try:

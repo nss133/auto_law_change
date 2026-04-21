@@ -67,10 +67,13 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
     chr_cls_cd: str,
     target_date_str: str,
     lsi_seq: str | None = None,
+    *,
+    announcement_date_str: str | None = None,
 ) -> tuple[str, dict | None]:
     """
     OpenAPI target=eflaw를 사용하여 제·개정이유를 가져온다.
     ID(법령ID)로 조회 후 실패 시 MST(lsi_seq)로 재시도한다.
+    efYd(시행일) 불일치 시 announcement_date(공포일) → efYd 없이 순차 재시도.
     """
     ef_yd = _target_date_str_to_ef_yd(target_date_str)
     oc = _get_oc()
@@ -84,20 +87,40 @@ def fetch_revision_reason_from_ls_rvs_rsn_list(
             logger.debug("eflaw API 호출 실패: %s", e)
             return "", None
 
-    url_id = (
-        f"https://www.law.go.kr/DRF/lawService.do"
-        f"?OC={oc}&target=eflaw&ID={ls_id}&efYd={ef_yd}&chrClsCd={chr_cls_cd}&type=XML"
-    )
-    reason_text, metadata = _fetch(url_id)
+    # efYd 후보 목록: 시행일 → 공포일 → 없음(최신)
+    ef_yd_candidates: list[str | None] = [ef_yd]
+    if announcement_date_str:
+        ann_yd = _target_date_str_to_ef_yd(announcement_date_str)
+        if ann_yd and ann_yd != ef_yd:
+            ef_yd_candidates.append(ann_yd)
+    ef_yd_candidates.append(None)  # efYd 파라미터 없이 (최신 개정본)
 
-    if not reason_text and lsi_seq:
-        url_mst = (
+    law_name_for_log = ls_id  # 로그용
+
+    for candidate in ef_yd_candidates:
+        yd_param = f"&efYd={candidate}" if candidate else ""
+        url_id = (
             f"https://www.law.go.kr/DRF/lawService.do"
-            f"?OC={oc}&target=eflaw&MST={lsi_seq}&efYd={ef_yd}&chrClsCd={chr_cls_cd}&type=XML"
+            f"?OC={oc}&target=eflaw&ID={ls_id}{yd_param}&chrClsCd={chr_cls_cd}&type=XML"
         )
-        reason_text, metadata = _fetch(url_mst)
+        reason_text, metadata = _fetch(url_id)
+        print(f"[eflaw] {law_name_for_log}: efYd={candidate} (ID) → {len(reason_text)}자")
 
-    return reason_text, metadata
+        if reason_text:
+            return reason_text, metadata
+
+        if lsi_seq:
+            url_mst = (
+                f"https://www.law.go.kr/DRF/lawService.do"
+                f"?OC={oc}&target=eflaw&MST={lsi_seq}{yd_param}&chrClsCd={chr_cls_cd}&type=XML"
+            )
+            reason_text, metadata = _fetch(url_mst)
+            print(f"[eflaw] {law_name_for_log}: efYd={candidate} (MST) → {len(reason_text)}자")
+
+            if reason_text:
+                return reason_text, metadata
+
+    return "", None
 
 def fetch_revision_html(meta: LawChangeMeta) -> str | None:
     """법령/행정규칙의 제정·개정이유 HTML을 가져온다."""
