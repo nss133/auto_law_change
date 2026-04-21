@@ -1,4 +1,4 @@
-"""Google Gemini API를 이용한 파급효과 문구 생성 (무료 티어 사용)."""
+"""파급효과 문구 생성: Gemini(1순위) → Groq(fallback) → None."""
 
 from __future__ import annotations
 
@@ -12,48 +12,35 @@ import requests
 # 프로젝트 루트 .env 로드 (CLI 진입 없이 호출될 때 대비)
 try:
     from dotenv import load_dotenv
-    _root = Path(__file__).resolve().parents[2]  # .../law_change_auto (프로젝트 루트)
+    _root = Path(__file__).resolve().parents[2]
     load_dotenv(_root / ".env")
 except Exception:
     pass
 
+# ── Gemini 설정 ──────────────────────────────────────────────
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-DEFAULT_MODEL = "gemini-2.5-flash"
-MAX_INPUT_CHARS = 1500
+GEMINI_MODEL = "gemini-2.5-flash"
 INTER_CALL_DELAY = 8  # 무료 티어 10 RPM 대응: 호출 간 최소 대기(초)
+
+# ── Groq 설정 ────────────────────────────────────────────────
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# ── 공통 설정 ────────────────────────────────────────────────
+MAX_INPUT_CHARS = 1500
 MAX_OUTPUT_TOKENS = 512
 
 
-def _get_api_key() -> Optional[str]:
-    """환경변수 GEMINI_API_KEY 반환."""
+def _get_gemini_key() -> Optional[str]:
     return os.getenv("GEMINI_API_KEY", "").strip() or None
 
 
-def fetch_impact_text(
-    law_name: str,
-    reason_paras: list[str],
-    main_paras: list[str],
-    *,
-    max_input_chars: int = MAX_INPUT_CHARS,
-) -> Optional[str]:
-    """
-    법령명·개정이유·주요내용을 입력으로 Gemini API에 파급효과 문구를 요청.
-    성공 시 파급효과 텍스트 반환. 실패·빈 응답 시 None(호출부에서 기본 문구로 대체).
-    """
-    api_key = _get_api_key()
-    if not api_key:
-        return None
+def _get_groq_key() -> Optional[str]:
+    return os.getenv("GROQ_API_KEY", "").strip() or None
 
-    # 무료 티어 10 RPM 제한 대응: 호출 전 대기
-    time.sleep(INTER_CALL_DELAY)
 
-    reason_text = " ".join(reason_paras).strip() if reason_paras else ""
-    main_text = " ".join(main_paras).strip() if main_paras else ""
-    combined = f"[개정이유]\n{reason_text}\n\n[주요내용]\n{main_text}".strip()
-    if len(combined) > max_input_chars:
-        combined = combined[: max_input_chars - 3].rstrip() + "…"
-
-    prompt = f"""다음 법령/규정 개정에 대한 "파급효과" 문단을 작성해 주세요. 법령제·개정 안내서(법무팀 배포)에 들어가는 문구이므로, 기존 안내서 문체와 표현을 맞춰 주세요.
+def _build_prompt(law_name: str, combined: str) -> str:
+    return f"""다음 법령/규정 개정에 대한 "파급효과" 문단을 작성해 주세요. 법령제·개정 안내서(법무팀 배포)에 들어가는 문구이므로, 기존 안내서 문체와 표현을 맞춰 주세요.
 
 [독자·맥락]
 - 생명보험회사에 있어서의 파급효과를 안내하는 문단임.
@@ -73,7 +60,25 @@ def fetch_impact_text(
 {combined or "(없음)"}
 """
 
-    url = f"{GEMINI_API_BASE}/{DEFAULT_MODEL}:generateContent"
+
+def _clean_text(text: str) -> Optional[str]:
+    """헤더 제거 및 최소 길이 검사."""
+    for prefix in ("## 파급효과", "##파급효과", "파급효과\n", "파급효과 "):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    return text if len(text) >= 12 else None
+
+
+def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
+    """Gemini API 호출. 429 시 최대 3회 retry."""
+    api_key = _get_gemini_key()
+    if not api_key:
+        return None
+
+    time.sleep(INTER_CALL_DELAY)
+
+    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -97,40 +102,96 @@ def fetch_impact_text(
             if not candidates:
                 return None
             parts = (candidates[0].get("content") or {}).get("parts") or []
-            if not parts:
-                return None
-            texts = []
-            for part in parts:
-                if part.get("thought") is True:
-                    continue
-                t = (part.get("text") or "").strip()
-                if t:
-                    texts.append(t)
-            text = " ".join(texts).strip() if texts else ""
-            for prefix in ("## 파급효과", "##파급효과", "파급효과\n", "파급효과 "):
-                if text.startswith(prefix):
-                    text = text[len(prefix) :].strip()
-                    break
-            return text if len(text) >= 12 else None
+            texts = [
+                (p.get("text") or "").strip()
+                for p in parts
+                if not p.get("thought") and (p.get("text") or "").strip()
+            ]
+            return _clean_text(" ".join(texts).strip()) if texts else None
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status == 429:
-                wait = [5, 15, 30][attempt]  # 5s, 15s, 30s
-                print(f"[Gemini] {law_name}: 429 Rate Limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                wait = [5, 15, 30][attempt]
+                print(f"[Gemini] {law_name}: 429 할당량 초과, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
             print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
             return None
         except Exception as e:
-            # ResourceExhausted (google.api_core) 등 문자열 매칭으로 429 감지
             err_str = str(e)
             if "429" in err_str or "ResourceExhausted" in type(e).__name__:
                 wait = [5, 15, 30][attempt]
-                print(f"[Gemini] {law_name}: {type(e).__name__} (rate limit), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                print(f"[Gemini] {law_name}: rate limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
             print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
             return None
-    # 모든 재시도 실패
-    print(f"[Gemini] {law_name}: {max_retries}회 재시도 모두 실패")
+
+    print(f"[Gemini] {law_name}: {max_retries}회 재시도 모두 실패 → Groq fallback")
     return None
+
+
+def _fetch_from_groq(law_name: str, prompt: str) -> Optional[str]:
+    """Groq API 호출 (Gemini 실패 시 fallback)."""
+    api_key = _get_groq_key()
+    if not api_key:
+        return None
+
+    try:
+        resp = requests.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "temperature": 0.2,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        text = (
+            resp.json()
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+        result = _clean_text(text) if text else None
+        if result:
+            print(f"[Groq] {law_name}: 파급효과 생성 성공")
+        return result
+    except Exception as e:
+        print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
+        return None
+
+
+def fetch_impact_text(
+    law_name: str,
+    reason_paras: list[str],
+    main_paras: list[str],
+    *,
+    max_input_chars: int = MAX_INPUT_CHARS,
+) -> Optional[str]:
+    """
+    파급효과 문구 생성: Gemini(1순위) → Groq(fallback) → None.
+    None 반환 시 호출부에서 기본 문구로 대체.
+    """
+    reason_text = " ".join(reason_paras).strip() if reason_paras else ""
+    main_text = " ".join(main_paras).strip() if main_paras else ""
+    combined = f"[개정이유]\n{reason_text}\n\n[주요내용]\n{main_text}".strip()
+    if len(combined) > max_input_chars:
+        combined = combined[:max_input_chars - 3].rstrip() + "…"
+
+    prompt = _build_prompt(law_name, combined)
+
+    # 1순위: Gemini
+    result = _fetch_from_gemini(law_name, prompt)
+    if result:
+        return result
+
+    # 2순위: Groq
+    return _fetch_from_groq(law_name, prompt)
