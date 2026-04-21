@@ -332,9 +332,9 @@ def main(argv: list[str] | None = None) -> None:
 
     from law_change_auto.services import gemini_client as _gmod
 
-    if not _gmod._get_api_key():
+    if not _gmod._get_gemini_key() and not _gmod._get_groq_key():
         print(
-            "[law_change_auto] 경고: GEMINI_API_KEY가 없습니다. 파급효과는 기본 문구만 넣습니다.",
+            "[law_change_auto] 경고: GEMINI_API_KEY / GROQ_API_KEY가 없습니다. 파급효과는 기본 문구만 넣습니다.",
             flush=True,
         )
 
