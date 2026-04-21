@@ -111,7 +111,7 @@ def fetch_impact_text(
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status == 429:
-                wait = 2 ** attempt  # 1s, 2s, 4s
+                wait = [5, 15, 30][attempt]  # 5s, 15s, 30s
                 print(f"[Gemini] {law_name}: 429 Rate Limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
@@ -121,7 +121,7 @@ def fetch_impact_text(
             # ResourceExhausted (google.api_core) 등 문자열 매칭으로 429 감지
             err_str = str(e)
             if "429" in err_str or "ResourceExhausted" in type(e).__name__:
-                wait = 2 ** attempt
+                wait = [5, 15, 30][attempt]
                 print(f"[Gemini] {law_name}: {type(e).__name__} (rate limit), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
