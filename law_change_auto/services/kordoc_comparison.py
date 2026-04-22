@@ -230,16 +230,17 @@ def extract_comparison_from_file(
             continue
         all_rows.extend(_rows_to_comparison(rows))
 
-    if all_rows:
-        return all_rows
-
-    # GFM 추출 실패 시 LLM fallback
+    # LLM fallback: GFM 결과가 없거나 3행 미만(부실 추출)이면 LLM도 시도
     if llm_fallback and re.search(r"신\s*[ㆍ·]?\s*구\s*조\s*문|개정\s*문|제\s*\d+\s*조", markdown):
-        name = law_name or file_path.rsplit("/", 1)[-1]
-        print(f"[kordoc] {name}: GFM 추출 실패 → LLM fallback")
-        items = fetch_comparison_json(name, markdown)
-        if items:
-            all_rows = _json_to_rows(items)
+        if len(all_rows) < 3:
+            name = law_name or file_path.rsplit("/", 1)[-1]
+            reason = "GFM 추출 실패" if not all_rows else f"GFM {len(all_rows)}행(부실) → LLM 보완"
+            print(f"[kordoc] {name}: {reason} → LLM fallback")
+            items = fetch_comparison_json(name, markdown)
+            if items:
+                llm_rows = _json_to_rows(items)
+                if len(llm_rows) > len(all_rows):
+                    all_rows = llm_rows
 
     return all_rows
 
@@ -270,7 +271,7 @@ def extract_comparison_from_pdf_paths(
     all_rows: list[ArticleComparisonRow] = []
     for label, saved_path in comparison_pdfs:
         try:
-            rows = extract_comparison_from_file(saved_path)
+            rows = extract_comparison_from_file(saved_path, law_name=label, llm_fallback=True)
             if rows:
                 print(f"[kordoc] {label}: {len(rows)}행 추출")
                 all_rows.extend(rows)

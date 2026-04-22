@@ -377,7 +377,7 @@ def collect_details_for_date(
     except Exception as e:
         print(f"[law_change_auto] 경고: FSC 입법예고 조회 중 오류 (무시): {e}")
 
-    seen_seqs: set[str] = set()
+    seq_to_idx: dict[str, int] = {}
     deduped: List[LawChangeDetail] = []
     for d in details:
         seq_key = (
@@ -386,9 +386,15 @@ def collect_details_for_date(
             or d.meta.law_id
             or f"{d.meta.law_name}_{d.meta.announcement_date}"
         )
-        if seq_key in seen_seqs:
+        if seq_key in seq_to_idx:
+            # 이미 있는 항목에 comparison 정보가 없으면 나중 버전으로 보완
+            existing = deduped[seq_to_idx[seq_key]]
+            if not existing.article_comparisons and d.article_comparisons:
+                existing.article_comparisons = d.article_comparisons
+            if not existing.comparison_pdf_paths and d.comparison_pdf_paths:
+                existing.comparison_pdf_paths = d.comparison_pdf_paths
             continue
-        seen_seqs.add(seq_key)
+        seq_to_idx[seq_key] = len(deduped)
         deduped.append(d)
     if len(deduped) < len(details):
         print(f"[law_change_auto] 중복 제거: {len(details)}건 → {len(deduped)}건")

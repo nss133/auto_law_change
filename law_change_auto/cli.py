@@ -290,9 +290,13 @@ def _process_comprehensive_period(
             or f"{d.meta.law_name}_{d.meta.announcement_date}"
         )
         if seq_key in seen_seqs:
+            existing = deduped[seen_seqs[seq_key]]
             # 이미 저장된 버전에 PDF paths 보완
-            if d.comparison_pdf_paths and not deduped[seen_seqs[seq_key]].comparison_pdf_paths:
-                deduped[seen_seqs[seq_key]].comparison_pdf_paths = d.comparison_pdf_paths
+            if d.comparison_pdf_paths and not existing.comparison_pdf_paths:
+                existing.comparison_pdf_paths = d.comparison_pdf_paths
+            # 이미 저장된 버전에 신구조문 rows 보완
+            if d.article_comparisons and not existing.article_comparisons:
+                existing.article_comparisons = d.article_comparisons
             continue
         seen_seqs[seq_key] = len(deduped)
         deduped.append(d)
