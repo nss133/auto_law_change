@@ -143,6 +143,55 @@ def fetch_revision_html(meta: LawChangeMeta) -> str | None:
     except Exception:
         return None
 
+def fetch_revision_hwp_text(meta: LawChangeMeta) -> str | None:
+    """lsRvsHwpSave.do로 개정문 HWP를 다운로드하여 kordoc로 파싱한 텍스트를 반환.
+
+    법령 타입(ls)에서 lsi_seq가 있을 때만 동작.
+    개정이유 + 개정문 전체 텍스트를 반환 — LLM 기반 신구조문 추출에 활용.
+    """
+    if meta.law_type != "ls" or not meta.lsi_seq:
+        return None
+
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    _KORDOC_CLI = Path(
+        "/Users/nsss/.claude/plugins/marketplaces/korean-law-marketplace"
+        "/node_modules/kordoc/dist/cli.js"
+    )
+    if not _KORDOC_CLI.exists():
+        return None
+
+    try:
+        resp = requests.post(
+            "https://www.law.go.kr/lsRvsHwpSave.do",
+            headers=HEADERS,
+            data={"lsiSeq": meta.lsi_seq, "saveExt": "hwp"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        if not resp.content or b"<?xml" not in resp.content[:30]:
+            return None
+    except Exception:
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as f:
+        f.write(resp.content)
+        tmp_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["node", str(_KORDOC_CLI), "--silent", tmp_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return result.stdout.strip() or None
+    except Exception:
+        return None
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def fetch_old_new_html(meta: LawChangeMeta) -> str | None:
     """법령/행정규칙의 신·구조문 대비표 XML을 가져온다."""
     oc = _get_oc()

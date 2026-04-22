@@ -36,8 +36,10 @@ from ..fetchers.web_scraper import (
 from ..fetchers.content_fetcher import (
     fetch_old_new_html,
     fetch_revision_html,
+    fetch_revision_hwp_text,
     fetch_revision_reason_from_ls_rvs_rsn_list,
 )
+from .kordoc_comparison import extract_comparison_from_pdf_paths, extract_comparison_via_llm
 from ..fetchers.briefing_db_fetcher import (
     get_briefing_notices_for_monitored,
     fetch_briefing_notice_detail,
@@ -271,6 +273,18 @@ def collect_details_for_date(
         details.append(detail)
         if old_new_xml and not detail.article_comparisons:
             print(f"[law_change_auto] 신구대비표 API 응답 있으나 파싱 결과 0행: {meta.law_name} lsi={meta.lsi_seq}")
+
+        # XML API로 신구대비표 확보 실패 시 → 개정문 HWP + LLM fallback
+        if not detail.article_comparisons:
+            try:
+                hwp_text = fetch_revision_hwp_text(meta)
+                if hwp_text:
+                    llm_rows = extract_comparison_via_llm(hwp_text, meta.law_name)
+                    if llm_rows:
+                        detail.article_comparisons = llm_rows
+                        print(f"[kordoc+LLM] {meta.law_name}: 개정문 HWP → {len(llm_rows)}행 추출")
+            except Exception as e:
+                print(f"[kordoc+LLM] {meta.law_name}: fallback 실패: {e}")
 
     if law_filter:
         norm_filter = law_filter.replace(" ", "")
@@ -636,13 +650,14 @@ def process_legislation(
                 comparison_pdfs = []
 
             combined = reason_sections + main_sections
+            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
             details.append(
                 LawChangeDetail(
                     meta=meta,
                     reason_sections=reason_sections,
                     main_change_sections=main_sections,
                     combined_reason_and_main_sections=combined,
-                    article_comparisons=[],
+                    article_comparisons=kordoc_comparisons,
                     opinion_deadline=opinion_deadline,
                     comparison_pdf_paths=comparison_pdfs,
                 )
@@ -721,13 +736,14 @@ def collect_legislation_details(
                 comparison_pdfs = []
 
             combined = reason_sections + main_sections
+            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
             details.append(
                 LawChangeDetail(
                     meta=meta,
                     reason_sections=reason_sections,
                     main_change_sections=main_sections,
                     combined_reason_and_main_sections=combined,
-                    article_comparisons=[],
+                    article_comparisons=kordoc_comparisons,
                     opinion_deadline=opinion_deadline,
                     comparison_pdf_paths=comparison_pdfs,
                 )

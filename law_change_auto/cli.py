@@ -231,7 +231,9 @@ def _write_guides_numbered_with_toc(
 def _download_legislation_notice_pdf_attachments(
     details: List[LawChangeDetail], output_dir: Path
 ) -> None:
-    """입법예고 PDF 법령안 첨부만 안내서 폴더에 저장 (main 브랜치와 동일 필터)."""
+    """입법예고 법령안 첨부(PDF·HWP·HWPX)를 안내서 폴더에 저장."""
+    _doc_exts = (".pdf", ".hwp", ".hwpx")
+
     for detail in details:
         if detail.meta.category != "입법예고" or not detail.attachments:
             continue
@@ -240,12 +242,14 @@ def _download_legislation_notice_pdf_attachments(
             att_url = att.get("url", "")
             if not att_name or not att_url:
                 continue
-            if not att_url.lower().endswith(".pdf") and ".pdf" not in att_url.lower():
+            url_lower = att_url.lower()
+            if not any(url_lower.endswith(ext) or ext in url_lower for ext in _doc_exts):
                 continue
             if "법령안" not in att_name and "법령 안" not in att_name:
                 continue
             safe_att = re.sub(r'[\\/:*?"<>|]', "_", att_name)
-            if not safe_att.lower().endswith(".pdf"):
+            # 확장자 보정
+            if not any(safe_att.lower().endswith(ext) for ext in _doc_exts):
                 safe_att += ".pdf"
             att_path = output_dir / safe_att
             try:

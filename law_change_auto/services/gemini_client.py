@@ -169,6 +169,135 @@ def _fetch_from_groq(law_name: str, prompt: str) -> Optional[str]:
         return None
 
 
+_COMPARISON_MAX_INPUT = 6000  # 신구조문 추출용 입력 제한 (더 긴 텍스트 허용)
+_COMPARISON_MAX_OUTPUT = 2048
+
+
+def _build_comparison_prompt(law_name: str, text: str) -> str:
+    return f"""다음 법령 개정 텍스트에서 신·구조문 대비표를 JSON 배열로 추출하시오.
+
+[법령명] {law_name}
+
+[추출 규칙]
+- "제N조 중 'A'를 'B'로 한다" → old_text: A, new_text: B
+- "제N조를 다음과 같이 한다." 이후 조문 → old_text: null, new_text: 새 조문 전체
+- "현행과 같음" 또는 "(생략)" → 해당 값 그대로 기재
+- 조문번호 없는 항/호 변경도 포함
+- 헤더·개정이유·부칙은 제외
+
+[출력 형식] JSON 배열만 출력. 설명 없이.
+[
+  {{"article_no": "제3조", "article_title": "정의", "old_text": "기존 조문 내용", "new_text": "개정 조문 내용"}},
+  {{"article_no": null, "article_title": null, "old_text": null, "new_text": "신설 조문 내용"}}
+]
+
+[텍스트]
+{text}
+"""
+
+
+def _fetch_comparison_from_groq(law_name: str, prompt: str) -> list[dict] | None:
+    """Groq으로 신구조문 JSON 추출 (빠른 응답, 비율 제한 완화)."""
+    api_key = _get_groq_key()
+    if not api_key:
+        return None
+    try:
+        resp = requests.post(
+            GROQ_API_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": _COMPARISON_MAX_OUTPUT,
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        import json, re
+        # json_object 모드는 최상위 객체를 반환할 수 있음 — 배열 추출
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        # {"rows": [...]} 등 래핑된 경우
+        for v in parsed.values():
+            if isinstance(v, list):
+                return v
+        return None
+    except Exception as e:
+        print(f"[Groq] {law_name}: 신구조문 추출 실패: {e}")
+        return None
+
+
+def _fetch_comparison_from_gemini(law_name: str, prompt: str) -> list[dict] | None:
+    """Gemini로 신구조문 JSON 추출."""
+    api_key = _get_gemini_key()
+    if not api_key:
+        return None
+    time.sleep(INTER_CALL_DELAY)
+    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
+    try:
+        resp = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            params={"key": api_key},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": _COMPARISON_MAX_OUTPUT,
+                    "temperature": 0.1,
+                    "responseMimeType": "application/json",
+                    "thinkingConfig": {"thinkingBudget": 0},
+                },
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        import json
+        parts = (resp.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+        raw = " ".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        for v in parsed.values():
+            if isinstance(v, list):
+                return v
+        return None
+    except Exception as e:
+        print(f"[Gemini] {law_name}: 신구조문 추출 실패: {e}")
+        return None
+
+
+def fetch_comparison_json(
+    law_name: str,
+    text: str,
+    *,
+    max_input_chars: int = _COMPARISON_MAX_INPUT,
+) -> list[dict] | None:
+    """개정문/PDF 텍스트에서 신구조문 대비표를 JSON으로 추출.
+
+    Groq 우선(빠름) → Gemini fallback.
+    반환: [{"article_no": ..., "article_title": ..., "old_text": ..., "new_text": ...}, ...]
+    """
+    if not text or not text.strip():
+        return None
+    if len(text) > max_input_chars:
+        text = text[:max_input_chars].rstrip() + "…"
+    prompt = _build_comparison_prompt(law_name, text)
+
+    result = _fetch_comparison_from_groq(law_name, prompt)
+    if result:
+        print(f"[Groq] {law_name}: 신구조문 {len(result)}행 추출")
+        return result
+
+    result = _fetch_comparison_from_gemini(law_name, prompt)
+    if result:
+        print(f"[Gemini] {law_name}: 신구조문 {len(result)}행 추출")
+    return result
+
+
 def fetch_impact_text(
     law_name: str,
     reason_paras: list[str],
