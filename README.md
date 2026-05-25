@@ -21,12 +21,20 @@ macOS 데스크톱에서 매일 자동으로 국가법령정보센터(법제처)
 pip install -r requirements.txt
 ```
 
+개발·테스트용 의존성까지 설치하려면:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ## 사용법
 
 ### 환경변수
 
 - `LAW_GO_API_KEY`: 국가법령정보센터 API OC(이메일 ID). [open.law.go.kr](https://open.law.go.kr)에서 발급.
 - `GEMINI_API_KEY`: **파급효과** 문구 생성용(권장). [Google AI Studio](https://aistudio.google.com/apikey)에서 발급. 없으면 기본 문구만 사용합니다.
+
+`.env.example`을 참고해 프로젝트 루트에 `.env` 파일을 만들 수 있습니다.
 
 파급효과 문단은 **Gemini API**로 생성하고, 호출 실패 시 **기본 문구**로 둡니다. 생명보험회사 임직원 독자·-음/-임 문체로 작성하도록 프롬프트되어 있습니다.
 
@@ -38,6 +46,14 @@ pip install -r requirements.txt
    python -m law_change_auto.cli --date 2024-10-25 --law 보험업법
    ```
 3. `output/` 폴더에 **`목차.docx`**와 **`1. {법령명} 시행 안내.docx`** 등 번호 붙은 파일이 생성됩니다(건수만큼). 기간 모드(`--date-from`/`--date-to`)와 동일한 파일명 규칙입니다.
+4. 실행 후 `run_report.json`이 함께 생성되어 생성 파일, 법령별 매칭·파싱 건수, 신구조문 추출 건수를 확인할 수 있습니다.
+
+환경과 모니터링 목록만 확인하려면:
+
+```bash
+python -m law_change_auto.cli --validate-env
+python -m law_change_auto.cli --list-monitored
+```
 
 ### 입법예고/규정변경예고 모드
 
@@ -72,4 +88,3 @@ python run_lsi_255535.py
 ```
 
 macOS에서는 `launchd`를 이용해 위 CLI를 매일 정해진 시각에 자동 실행하도록 설정할 수 있습니다.
-

@@ -316,6 +316,8 @@ def _detail_to_docx(
     generator: DocxGenerator,
 ) -> None:
     meta = detail.meta
+    is_legislation = meta.category == "입법예고"
+    generator.legislation_format = is_legislation
     if meta.category == "행정규칙":
         title_suffix = "고시 규정변경예고 안내"
     elif meta.category == "입법예고":
@@ -358,16 +360,25 @@ def _detail_to_docx(
 
     main_paras = _clean_revision_paras(detail.main_change_sections or [])
 
-    # 개정이유·주요내용이 합쳐진 경우: "1. 개정이유 및 주요내용" / 분리된 경우: "1. 개정이유" + "2. 주요내용"
-    if main_paras:
+    # 입법예고/규정변경예고는 legal_doc_converter 형식에 맞춰 개정이유와 주요내용을 분리한다.
+    if is_legislation or main_paras:
         if reason_paras:
             generator.add_section("1", "개정이유", reason_paras)
         else:
             generator.add_section("1", "개정이유", _fallback_reason_message(meta))
         generator.add_section("2", "주요내용")
-        generator.add_main_contents(paragraphs=main_paras)
-        impact_num = "3"
-        table_num = "4"
+        if main_paras:
+            generator.add_main_contents(paragraphs=main_paras)
+        else:
+            generator.add_main_contents(
+                paragraphs=["※ 주요내용을 자동으로 추출하지 못했습니다. 원문을 확인해 주세요."]
+            )
+        next_num = 3
+        if is_legislation and detail.opinion_deadline:
+            generator.add_section(str(next_num), "의견제출기한", detail.opinion_deadline)
+            next_num += 1
+        impact_num = str(next_num)
+        table_num = str(next_num + 1)
     else:
         if reason_paras:
             generator.add_section("1", "개정이유 및 주요내용", reason_paras)
@@ -381,7 +392,13 @@ def _detail_to_docx(
     impact_text = (
         fetch_impact_text_gemini(meta.law_name, reason_paras, main_paras) or fallback_impact
     )
-    generator.add_section(impact_num, "파급효과", impact_text, is_bold=True)
+    generator.add_section(
+        impact_num,
+        "파급효과",
+        impact_text,
+        is_bold=True,
+        content_font_size=10 if is_legislation else None,
+    )
 
     # 신구조문 대비표
     generator.add_section(table_num, "신구조문 대비표")

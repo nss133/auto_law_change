@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
+import json
+import os
 import re
 import requests
+import sys
 from datetime import date
 from pathlib import Path
 from typing import List, Set, Tuple
@@ -52,6 +56,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="실제 DOCX 생성 없이 콘솔 로그만 출력합니다.",
     )
     parser.add_argument(
+        "--list-monitored",
+        action="store_true",
+        help="모니터링 대상 법령 목록만 출력하고 종료합니다.",
+    )
+    parser.add_argument(
+        "--validate-env",
+        action="store_true",
+        help="필수 파일·환경변수·Python 의존성 상태를 점검하고 종료합니다.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default="output",
@@ -80,6 +94,144 @@ def _resolve_target_date(value: str) -> dt.date:
     if value == "today":
         return dt.date.today()
     return dt.date.fromisoformat(value)
+
+
+def _validate_environment(monitored_laws: List[MonitoredLaw]) -> int:
+    """로컬 실행 전 점검. 네트워크 호출 없이 구성 상태만 확인한다."""
+    checks: list[tuple[str, bool, str]] = []
+
+    checks.append(
+        (
+            "Python 3.10 이상",
+            sys.version_info >= (3, 10),
+            f"현재 {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        )
+    )
+    checks.append(
+        (
+            "모니터링 엑셀",
+            Path("data/monitored_laws.xlsx").exists() and bool(monitored_laws),
+            f"{len(monitored_laws)}건 로드",
+        )
+    )
+    checks.append(
+        (
+            "LAW_GO_API_KEY",
+            bool(os.getenv("LAW_GO_API_KEY", "").strip()),
+            "법령 API 조회에 필요",
+        )
+    )
+    checks.append(
+        (
+            "GEMINI_API_KEY 또는 GROQ_API_KEY",
+            bool(
+                os.getenv("GEMINI_API_KEY", "").strip()
+                or os.getenv("GROQ_API_KEY", "").strip()
+            ),
+            "없으면 기본 파급효과 문구 사용",
+        )
+    )
+
+    required_modules = [
+        "requests",
+        "bs4",
+        "dotenv",
+        "lxml",
+        "docx",
+        "pandas",
+        "openpyxl",
+        "Levenshtein",
+        "fitz",
+        "pdfplumber",
+    ]
+    for module_name in required_modules:
+        checks.append(
+            (
+                f"Python 모듈: {module_name}",
+                importlib.util.find_spec(module_name) is not None,
+                "requirements.txt",
+            )
+        )
+
+    print("[law_change_auto] 환경 점검")
+    failed = 0
+    for label, ok, note in checks:
+        mark = "OK" if ok else "FAIL"
+        print(f"  [{mark}] {label} - {note}")
+        if not ok:
+            failed += 1
+
+    if failed:
+        print(f"[law_change_auto] 점검 실패 {failed}건. 위 항목을 보완해 주세요.")
+        return 1
+    print("[law_change_auto] 환경 점검 통과")
+    return 0
+
+
+def _date_to_iso(value: dt.date | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _detail_report_item(detail: LawChangeDetail, output_file: Path | None = None) -> dict:
+    meta = detail.meta
+    return {
+        "law_name": meta.law_name,
+        "category": meta.category,
+        "change_type": meta.change_type,
+        "announcement_date": _date_to_iso(meta.announcement_date),
+        "effective_date": _date_to_iso(meta.effective_date),
+        "source": meta.source,
+        "law_id": meta.law_id,
+        "lsi_seq": meta.lsi_seq,
+        "admrul_seq": meta.admrul_seq,
+        "opinion_deadline": detail.opinion_deadline,
+        "reason_count": len(detail.reason_sections),
+        "main_change_count": len(detail.main_change_sections),
+        "comparison_count": len(detail.article_comparisons),
+        "attachment_count": len(detail.attachments),
+        "output_file": output_file.name if output_file else None,
+    }
+
+
+def _write_run_report(
+    output_dir: Path,
+    *,
+    mode: str,
+    period_line: str,
+    details: List[LawChangeDetail],
+    created: List[Path],
+    guide_date: dt.date,
+) -> Path:
+    """실행 결과를 JSON으로 남겨 누락·매칭·산출물 추적을 쉽게 한다."""
+    detail_files = [path for path in created if path.name != "목차.docx"]
+    report = {
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "mode": mode,
+        "period": period_line,
+        "guide_date": guide_date.isoformat(),
+        "summary": {
+            "detail_count": len(details),
+            "created_file_count": len(created),
+            "legislation_count": sum(1 for d in details if d.meta.category == "입법예고"),
+            "admin_rule_count": sum(1 for d in details if d.meta.category == "행정규칙"),
+            "law_count": sum(1 for d in details if d.meta.category == "법령"),
+        },
+        "files": [str(path.resolve()) for path in created],
+        "details": [
+            _detail_report_item(
+                detail,
+                detail_files[i] if i < len(detail_files) else None,
+            )
+            for i, detail in enumerate(details)
+        ],
+    }
+    report_path = output_dir / "run_report.json"
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[law_change_auto] 실행 리포트: {report_path.name}")
+    return report_path
 
 
 def _process_single_date(
@@ -130,6 +282,7 @@ def _process_single_date(
         guide_date=target_date,
         period_line=period_line,
         sort_fallback=target_date,
+        mode="single-date",
     )
     _download_legislation_notice_pdf_attachments(details, output_dir)
     return created
@@ -198,6 +351,7 @@ def _write_guides_numbered_with_toc(
     guide_date: dt.date,
     period_line: str,
     sort_fallback: dt.date,
+    mode: str = "guide",
 ) -> List[Path]:
     """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통."""
     output_dir = Path(output_dir)
@@ -225,6 +379,14 @@ def _write_guides_numbered_with_toc(
     toc_path = output_dir / "목차.docx"
     write_period_toc_docx(toc_path, period_line, toc_lines)
     created.insert(0, toc_path)
+    _write_run_report(
+        output_dir,
+        mode=mode,
+        period_line=period_line,
+        details=sorted_details,
+        created=created,
+        guide_date=guide_date,
+    )
     return created
 
 
@@ -318,6 +480,7 @@ def _process_comprehensive_period(
         guide_date=date_to,
         period_line=period_line,
         sort_fallback=date_to,
+        mode="period",
     )
     _download_legislation_notice_pdf_attachments(all_details, output_dir)
     return created
@@ -332,9 +495,14 @@ def main(argv: list[str] | None = None) -> None:
     print(f"[law_change_auto] 모니터링 대상 법령 수: {len(monitored_laws)}")
     print(f"[law_change_auto] 출력 폴더: {output_dir.resolve()}")
 
-    if args.dry_run:
+    if args.validate_env:
+        raise SystemExit(_validate_environment(monitored_laws))
+
+    if args.list_monitored or args.dry_run:
         for law in monitored_laws:
             print(f"  - {law.name}")
+        if args.list_monitored:
+            return
         print("[law_change_auto] dry-run 모드이므로 DOCX를 생성하지 않습니다.")
         return
 
