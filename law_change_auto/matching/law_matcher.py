@@ -29,6 +29,11 @@ def _normalize_name(name: str) -> str:
     return name.lower()
 
 
+# 짧은 법령명은 한 음절 차이가 곧 다른 법령(예: 국어기본법↔국세기본법, 상법↔기상법)이라
+# Levenshtein 비율만으로는 오탐이 난다. 정규화 후 길이가 이 값 미만이면 완전일치만 매칭으로 인정.
+MIN_FUZZY_LEN = 10
+
+
 @dataclass
 class MatchResult:
     meta: LawChangeMeta
@@ -41,7 +46,11 @@ def match_laws(
     metas: List[LawChangeMeta],
     threshold: float = 0.8,
 ) -> List[MatchResult]:
-    """모니터링 대상 법령명과 수집한 법령 메타데이터를 유사도 기반으로 매칭."""
+    """모니터링 대상 법령명과 수집한 법령 메타데이터를 유사도 기반으로 매칭.
+
+    짧은 법령명(정규화 후 < ``MIN_FUZZY_LEN``)은 fuzzy 매칭 시 한 음절 차이로 다른
+    법령을 오탐하므로 완전일치만 인정한다. 긴 이름만 ``threshold`` 비율 매칭을 허용한다.
+    """
     results: List[MatchResult] = []
 
     normalized_monitored = [
@@ -53,16 +62,22 @@ def match_laws(
         if not norm_meta:
             continue
 
-        best_match: Tuple[MonitoredLaw | None, float] = (None, 0.0)
+        best_match: Tuple[MonitoredLaw | None, str, float] = (None, "", 0.0)
         for monitored, norm_name in normalized_monitored:
             if not norm_name:
                 continue
             score = levenshtein_ratio(norm_meta, norm_name)
-            if score > best_match[1]:
-                best_match = (monitored, score)
+            if score > best_match[2]:
+                best_match = (monitored, norm_name, score)
 
-        monitored, best_score = best_match
-        if monitored is not None and best_score >= threshold:
+        monitored, best_norm, best_score = best_match
+        if monitored is None or best_score < threshold:
+            continue
+
+        # 짧은 이름은 완전일치만, 긴 이름만 fuzzy 허용
+        is_exact = norm_meta == best_norm
+        long_enough = min(len(norm_meta), len(best_norm)) >= MIN_FUZZY_LEN
+        if is_exact or long_enough:
             results.append(MatchResult(meta=meta, monitored=monitored, score=best_score))
 
     return results

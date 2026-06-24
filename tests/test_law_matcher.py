@@ -143,3 +143,44 @@ class TestMatchLaws:
         results = match_laws(monitored, metas, threshold=0.8)
         assert len(results) == 1
         assert results[0].meta.detail_url == "http://a.com"
+
+
+class TestShortNameFalsePositives:
+    """짧은 법령명 1음절 차이 오탐 방지 (국어기본법↔국세기본법 등)."""
+
+    @pytest.mark.parametrize(
+        "monitored_name, fp_name",
+        [
+            ("국세기본법", "국어기본법"),   # 1글자(어↔세)
+            ("국세기본법", "국토기본법"),   # 1글자(토↔세)
+            ("상법", "기상법 시행령"),       # '상법'⊂'기상법'
+            ("상법", "상표법 시행규칙"),     # 1글자
+            ("지방세법", "지방세징수법 시행규칙"),
+            ("지방세법", "지방세기본법 시행령"),
+        ],
+    )
+    def test_short_name_one_syllable_diff_not_matched(self, monitored_name, fp_name):
+        """짧은 이름은 0.8을 넘어도 완전일치가 아니면 매칭하지 않음."""
+        results = match_laws(
+            [_make_monitored(monitored_name)], [_make_meta(fp_name)], threshold=0.8
+        )
+        assert results == []
+
+    def test_short_name_exact_still_matches(self):
+        """짧은 이름이라도 완전일치(시행령 접미어 포함)는 매칭."""
+        results = match_laws(
+            [_make_monitored("국세기본법")],
+            [_make_meta("국세기본법 시행령")],
+            threshold=0.8,
+        )
+        assert len(results) == 1
+
+    def test_long_name_fuzzy_still_matches(self):
+        """긴 이름의 사소한 변형(1글자 오타)은 fuzzy로 계속 매칭."""
+        results = match_laws(
+            [_make_monitored("독점규제 및 공정거래에 관한 법률")],
+            [_make_meta("독점규제 및 공정거래에 관한 법뮬")],  # 律→뮬 오타
+            threshold=0.8,
+        )
+        assert len(results) == 1
+        assert results[0].score >= 0.8
