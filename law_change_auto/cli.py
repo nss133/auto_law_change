@@ -112,8 +112,8 @@ def _validate_environment(monitored_laws: List[MonitoredLaw]) -> int:
 
     checks.append(
         (
-            "Python 3.10 이상",
-            sys.version_info >= (3, 10),
+            "Python 3.9 이상 (3.10+ 권장)",
+            sys.version_info >= (3, 9),
             f"현재 {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         )
     )
