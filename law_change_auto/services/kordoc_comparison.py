@@ -6,18 +6,40 @@ ArticleComparisonRow 리스트로 반환한다.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 from ..models import ArticleComparisonRow
 from .gemini_client import fetch_comparison_json
 
-# korean-law-marketplace에 내장된 kordoc CLI 경로
-_KORDOC_CLI = Path(
-    "/Users/nsss/.claude/plugins/marketplaces/korean-law-marketplace"
-    "/node_modules/kordoc/dist/cli.js"
-)
+
+def _resolve_kordoc_cli() -> Path | None:
+    """kordoc CLI 경로 해석: KORDOC_CLI env → PATH(kordoc) → marketplace 기본경로.
+
+    하드코딩 경로 의존을 제거해 다른 머신·cron·launchd에서도 동작하도록 한다.
+    """
+    env = os.getenv("KORDOC_CLI", "").strip()
+    if env and Path(env).exists():
+        return Path(env)
+    which = shutil.which("kordoc")
+    if which:
+        return Path(which)
+    candidates = [
+        Path.home()
+        / ".claude/plugins/marketplaces/korean-law-marketplace"
+        / "node_modules/kordoc/dist/cli.js",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+# kordoc CLI 경로 (env·PATH·marketplace 순). subprocess 호출부에서 .js면 node로 실행.
+_KORDOC_CLI = _resolve_kordoc_cli()
 
 # GFM 구분선 행 (| --- | --- | 형식)
 _GFM_SEP_RE = re.compile(r"^\|[\s\-:|]+\|")
@@ -25,12 +47,19 @@ _GFM_SEP_RE = re.compile(r"^\|[\s\-:|]+\|")
 
 def _run_kordoc(file_path: str) -> str | None:
     """kordoc CLI로 문서를 마크다운으로 변환. 실패 시 None 반환."""
-    if not _KORDOC_CLI.exists():
-        print(f"[kordoc] CLI 없음: {_KORDOC_CLI}")
+    if _KORDOC_CLI is None:
+        print("[kordoc] CLI를 찾을 수 없음 (KORDOC_CLI env·PATH·marketplace 모두 부재)")
         return None
+    # .js면 node로, 그 외(설치된 바이너리)면 직접 실행
+    args = ["--silent", "--no-header-footer", file_path]
+    cmd = (
+        ["node", str(_KORDOC_CLI), *args]
+        if str(_KORDOC_CLI).endswith(".js")
+        else [str(_KORDOC_CLI), *args]
+    )
     try:
         result = subprocess.run(
-            ["node", str(_KORDOC_CLI), "--silent", "--no-header-footer", file_path],
+            cmd,
             capture_output=True,
             text=True,
             timeout=60,

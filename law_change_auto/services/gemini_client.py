@@ -20,7 +20,52 @@ except Exception:
 # ── Gemini 설정 ──────────────────────────────────────────────
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = "gemini-2.5-flash"
-INTER_CALL_DELAY = 8  # 무료 티어 10 RPM 대응: 호출 간 최소 대기(초)
+INTER_CALL_DELAY = 8  # (구) 무조건 대기. _gemini_throttle()로 대체 — 간격 기반 대기에만 사용.
+GEMINI_MIN_SPACING = 6.5  # 무료 티어 10 RPM(=6초) 대응: 직전 호출과의 최소 간격(초)
+GEMINI_429_CIRCUIT_LIMIT = 3  # 한 실행에서 연속 429 N회면 그 실행 동안 Gemini 스킵
+
+# 서킷 브레이커·간격 제어용 모듈 상태 (한 프로세스/실행 단위)
+_gemini_disabled = False
+_gemini_consecutive_429 = 0
+_last_gemini_call_ts = 0.0
+
+
+def reset_gemini_circuit() -> None:
+    """새 실행 시작 시 서킷 상태 초기화(테스트·장기 프로세스용)."""
+    global _gemini_disabled, _gemini_consecutive_429
+    _gemini_disabled = False
+    _gemini_consecutive_429 = 0
+
+
+def _gemini_throttle() -> None:
+    """직전 Gemini 호출과 GEMINI_MIN_SPACING 미만이면 그 차이만큼만 대기."""
+    global _last_gemini_call_ts
+    wait = GEMINI_MIN_SPACING - (time.time() - _last_gemini_call_ts)
+    if wait > 0:
+        time.sleep(wait)
+    _last_gemini_call_ts = time.time()
+
+
+def _note_gemini_429() -> None:
+    """429 누적. 한계 도달 시 서킷 오픈(이후 호출 즉시 Groq로)."""
+    global _gemini_consecutive_429, _gemini_disabled
+    _gemini_consecutive_429 += 1
+    if _gemini_consecutive_429 >= GEMINI_429_CIRCUIT_LIMIT and not _gemini_disabled:
+        _gemini_disabled = True
+        print(
+            f"[Gemini] 연속 429 {_gemini_consecutive_429}회 → 이번 실행 동안 Gemini 비활성화, "
+            f"Groq로 전환",
+            flush=True,
+        )
+
+
+def _note_gemini_ok() -> None:
+    global _gemini_consecutive_429
+    _gemini_consecutive_429 = 0
+
+
+def _gemini_enabled() -> bool:
+    return bool(_get_gemini_key()) and not _gemini_disabled
 
 # ── Groq 설정 ────────────────────────────────────────────────
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -71,12 +116,12 @@ def _clean_text(text: str) -> Optional[str]:
 
 
 def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
-    """Gemini API 호출. 429 시 최대 3회 retry."""
+    """Gemini API 호출. 429 시 최대 3회 retry. 서킷 오픈 시 즉시 None(→Groq)."""
     api_key = _get_gemini_key()
-    if not api_key:
+    if not api_key or _gemini_disabled:
         return None
 
-    time.sleep(INTER_CALL_DELAY)
+    _gemini_throttle()
 
     url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
     max_retries = 3
@@ -107,10 +152,15 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
                 for p in parts
                 if not p.get("thought") and (p.get("text") or "").strip()
             ]
+            _note_gemini_ok()
             return _clean_text(" ".join(texts).strip()) if texts else None
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status == 429:
+                _note_gemini_429()
+                if _gemini_disabled:
+                    print(f"[Gemini] {law_name}: 429 → 서킷 오픈, Groq로 전환")
+                    return None
                 wait = [5, 15, 30][attempt]
                 print(f"[Gemini] {law_name}: 429 할당량 초과, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
@@ -120,6 +170,10 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "ResourceExhausted" in type(e).__name__:
+                _note_gemini_429()
+                if _gemini_disabled:
+                    print(f"[Gemini] {law_name}: rate limit → 서킷 오픈, Groq로 전환")
+                    return None
                 wait = [5, 15, 30][attempt]
                 print(f"[Gemini] {law_name}: rate limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
@@ -232,11 +286,11 @@ def _fetch_comparison_from_groq(law_name: str, prompt: str) -> list[dict] | None
 
 
 def _fetch_comparison_from_gemini(law_name: str, prompt: str) -> list[dict] | None:
-    """Gemini로 신구조문 JSON 추출."""
+    """Gemini로 신구조문 JSON 추출. 서킷 오픈 시 즉시 None."""
     api_key = _get_gemini_key()
-    if not api_key:
+    if not api_key or _gemini_disabled:
         return None
-    time.sleep(INTER_CALL_DELAY)
+    _gemini_throttle()
     url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
     try:
         resp = requests.post(
@@ -259,6 +313,7 @@ def _fetch_comparison_from_gemini(law_name: str, prompt: str) -> list[dict] | No
         parts = (resp.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
         raw = " ".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
         parsed = json.loads(raw)
+        _note_gemini_ok()
         if isinstance(parsed, list):
             return parsed
         for v in parsed.values():
@@ -266,6 +321,8 @@ def _fetch_comparison_from_gemini(law_name: str, prompt: str) -> list[dict] | No
                 return v
         return None
     except Exception as e:
+        if "429" in str(e) or "ResourceExhausted" in type(e).__name__:
+            _note_gemini_429()
         print(f"[Gemini] {law_name}: 신구조문 추출 실패: {e}")
         return None
 
