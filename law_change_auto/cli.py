@@ -87,6 +87,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="웹 스크래핑 기반 교차검증을 비활성화합니다.",
     )
+    parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="법령제·개정 주요내용 요약 docx 생성을 비활성화합니다.",
+    )
+    parser.add_argument(
+        "--no-summary-llm",
+        action="store_true",
+        help="요약 docx의 한 줄 요약을 LLM 대신 본문 추출로만 생성합니다(빠름).",
+    )
     return parser.parse_args(argv)
 
 
@@ -241,6 +251,8 @@ def _process_single_date(
     law_filter: str,
     create_example_if_empty: bool = True,
     no_web_check: bool = False,
+    make_summary: bool = True,
+    summary_use_llm: bool = True,
 ) -> List[Path]:
     """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. `목차.docx` 및 `N. {법령명} … 안내.docx` 목록."""
     details = collect_details_for_date(
@@ -283,6 +295,8 @@ def _process_single_date(
         period_line=period_line,
         sort_fallback=target_date,
         mode="single-date",
+        make_summary=make_summary,
+        summary_use_llm=summary_use_llm,
     )
     _download_legislation_notice_pdf_attachments(details, output_dir)
     return created
@@ -352,6 +366,8 @@ def _write_guides_numbered_with_toc(
     period_line: str,
     sort_fallback: dt.date,
     mode: str = "guide",
+    make_summary: bool = True,
+    summary_use_llm: bool = True,
 ) -> List[Path]:
     """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통."""
     output_dir = Path(output_dir)
@@ -379,6 +395,25 @@ def _write_guides_numbered_with_toc(
     toc_path = output_dir / "목차.docx"
     write_period_toc_docx(toc_path, period_line, toc_lines)
     created.insert(0, toc_path)
+
+    if make_summary:
+        try:
+            from .docx_generator.summary_generator import generate_summary_docx
+
+            summary_path = output_dir / "법령제개정_주요내용_요약.docx"
+            result = generate_summary_docx(
+                sorted_details,
+                summary_path,
+                period_line=period_line,
+                guide_date=guide_date,
+                use_llm=summary_use_llm,
+            )
+            if result:
+                created.append(result)
+                print(f"[law_change_auto] 주요내용 요약 생성: {result.name}")
+        except Exception as e:
+            print(f"[law_change_auto] 주요내용 요약 생성 실패(무시): {e}")
+
     _write_run_report(
         output_dir,
         mode=mode,
@@ -429,6 +464,9 @@ def _process_comprehensive_period(
     law_filter: str,
     date_from: dt.date,
     date_to: dt.date,
+    *,
+    make_summary: bool = True,
+    summary_use_llm: bool = True,
 ) -> List[Path]:
     """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성. (기간 API + 병렬로 단축)"""
     all_details: List[LawChangeDetail] = collect_details_for_range(
@@ -481,6 +519,8 @@ def _process_comprehensive_period(
         period_line=period_line,
         sort_fallback=date_to,
         mode="period",
+        make_summary=make_summary,
+        summary_use_llm=summary_use_llm,
     )
     _download_legislation_notice_pdf_attachments(all_details, output_dir)
     return created
@@ -538,7 +578,9 @@ def main(argv: list[str] | None = None) -> None:
         print("[law_change_auto] 법령·시행령·행정규칙·입법예고 건별 안내서 생성 중...")
 
         created = _process_comprehensive_period(
-            output_dir, monitored_laws, law_filter, date_from, date_to
+            output_dir, monitored_laws, law_filter, date_from, date_to,
+            make_summary=not args.no_summary,
+            summary_use_llm=not args.no_summary_llm,
         )
         if created:
             for path in created:
@@ -558,6 +600,8 @@ def main(argv: list[str] | None = None) -> None:
             law_filter,
             create_example_if_empty=True,
             no_web_check=args.no_web_check,
+            make_summary=not args.no_summary,
+            summary_use_llm=not args.no_summary_llm,
         )
         if created:
             for path in created:

@@ -324,3 +324,68 @@ def fetch_impact_text(
 
     # 2순위: Groq
     return _fetch_from_groq(law_name, prompt)
+
+
+# ── 주요내용 한 줄 요약 (요약 문서용) ────────────────────────────
+_SUMMARY_MAX_INPUT = 1800
+_SUMMARY_MAX_LEN = 120  # 한 줄 요약 최대 글자 수
+
+
+def _build_summary_prompt(law_name: str, combined: str) -> str:
+    return f"""다음 법령/규정 제·개정 내용을 한 줄로 요약하시오. 법무팀 "법령제·개정 주요내용 요약" 문서의 표 한 칸에 들어가는 요약문임.
+
+[작성 지침]
+- 한 문장(한 줄)으로, 핵심 개정사항만 압축할 것. 최대 {_SUMMARY_MAX_LEN}자.
+- 명사형/체언 종결(예: "~ 확대", "~ 의무화", "~ 신설", "~ 기준 강화")로 끝낼 것. "~합니다"·"~한다" 금지.
+- 둘 이상의 핵심 변경은 쉼표로 나열할 것.
+- 번호·머리표(1., 가., ◎)·제목·따옴표 없이 본문만 출력할 것.
+
+[대상]
+{law_name}
+
+[제·개정 개요]
+{combined or "(없음)"}
+"""
+
+
+def _clean_summary(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    line = " ".join(text.split())
+    # 머리표·라벨 제거
+    for pref in ("요약:", "요약 :", "주요내용:", "- "):
+        if line.startswith(pref):
+            line = line[len(pref):].strip()
+    line = line.lstrip("1234567890.가나다라마바·◎- \t")
+    if len(line) > _SUMMARY_MAX_LEN:
+        line = line[:_SUMMARY_MAX_LEN].rstrip() + "…"
+    return line if len(line) >= 6 else None
+
+
+def fetch_one_line_summary(
+    law_name: str,
+    reason_paras: list[str],
+    main_paras: list[str],
+    *,
+    max_input_chars: int = _SUMMARY_MAX_INPUT,
+) -> Optional[str]:
+    """제·개정 내용을 한 줄로 요약. Groq(1순위, 빠름) → Gemini(fallback) → None.
+
+    None 반환 시 호출부에서 본문 추출 기반 기본 요약으로 대체.
+    """
+    main_text = " ".join(main_paras).strip() if main_paras else ""
+    reason_text = " ".join(reason_paras).strip() if reason_paras else ""
+    combined = f"[주요내용]\n{main_text}\n\n[개정이유]\n{reason_text}".strip()
+    if not combined or combined == "[주요내용]\n\n\n[개정이유]":
+        return None
+    if len(combined) > max_input_chars:
+        combined = combined[:max_input_chars - 1].rstrip() + "…"
+
+    prompt = _build_summary_prompt(law_name, combined)
+
+    # 1순위: Groq (다건 요약이므로 호출 지연 없는 Groq 우선)
+    result = _clean_summary(_fetch_from_groq(law_name, prompt))
+    if result:
+        return result
+    # 2순위: Gemini
+    return _clean_summary(_fetch_from_gemini(law_name, prompt))
