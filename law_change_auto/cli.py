@@ -368,10 +368,16 @@ def _write_guides_numbered_with_toc(
     mode: str = "guide",
     make_summary: bool = True,
     summary_use_llm: bool = True,
+    issue_date: dt.date | None = None,
 ) -> List[Path]:
-    """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통."""
+    """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통.
+
+    issue_date: 안내서·요약에 찍히는 발행월(법무팀 발행 기준). 기간 모드에서는 시작월을
+    쓰며, 미지정 시 guide_date를 사용한다. (시행일 등 본문 날짜와는 무관)
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    issue = issue_date or guide_date
     sorted_details = _sort_details_for_period_toc(details, sort_fallback)
     used_names: Set[str] = set()
     created: List[Path] = []
@@ -381,7 +387,7 @@ def _write_guides_numbered_with_toc(
         filename = _filename_for_detail(detail, used_names)
         numbered_filename = f"{i}. {filename}"
         output_file = output_dir / numbered_filename
-        generate_guide([detail], guide_date, output_file)
+        generate_guide([detail], issue, output_file)
         created.append(output_file)
         toc_pairs.append((detail, output_file))
 
@@ -406,6 +412,7 @@ def _write_guides_numbered_with_toc(
                 summary_path,
                 period_line=period_line,
                 guide_date=guide_date,
+                issue_date=issue,
                 use_llm=summary_use_llm,
             )
             if result:
@@ -521,6 +528,7 @@ def _process_comprehensive_period(
         mode="period",
         make_summary=make_summary,
         summary_use_llm=summary_use_llm,
+        issue_date=date_from,
     )
     _download_legislation_notice_pdf_attachments(all_details, output_dir)
     return created

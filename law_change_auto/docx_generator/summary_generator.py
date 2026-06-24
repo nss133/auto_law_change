@@ -217,9 +217,13 @@ def generate_summary_docx(
     *,
     period_line: str,
     guide_date: date,
+    issue_date: Optional[date] = None,
     use_llm: bool = True,
 ) -> Optional[Path]:
-    """주요내용 요약 docx 1건 생성. 생성 실패·대상 없음 시 None."""
+    """주요내용 요약 docx 1건 생성. 생성 실패·대상 없음 시 None.
+
+    guide_date: '시행일 미도래' 판정 기준일. issue_date: 발행월 표기(미지정 시 guide_date).
+    """
     details = [d for d in details if d.has_any_content() or d.article_comparisons]
     if not details:
         return None
@@ -231,7 +235,8 @@ def generate_summary_docx(
     # 표지
     _add_para(doc, f"{period_line} 법령제·개정 주요내용 요약",
               bold=True, size=15, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
-    _add_para(doc, f"{guide_date.year}. {guide_date.month:02d}.",
+    stamp = issue_date or guide_date
+    _add_para(doc, f"{stamp.year}. {stamp.month:02d}.",
               align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
     _add_para(doc, "법 무 팀", align=WD_ALIGN_PARAGRAPH.CENTER, space_after=12)
 
