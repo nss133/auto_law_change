@@ -17,15 +17,19 @@ from .pdf_extractor import download_pdf, extract_text_from_pdf_bytes
 
 
 def _is_regulation_gosi_label(label: str) -> bool:
-    """'규정 일부개정고시안' 등 신구조문 대비표 포함 PDF인지 판별. 공고·조문별이유서·규제영향분석서 등 제외."""
-    if "규정" not in label or "고시안" not in label:
+    """규정변경예고 본 고시안 PDF(규정 본문·신구조문 대비표 포함) 판별. 공고·이유서·분석서 제외.
+
+    '○○규정 일부개정고시안'뿐 아니라 '○○지정고시 전부개정고시안'처럼 명칭에 '규정'이
+    없는 고시도 포함하도록, '규정' 강제 조건을 제거하고 '고시안' 계열로 판별한다.
+    """
+    if "고시안" not in label:
         return False
     # 제외: 공고문, 조문별 재/제개정이유서, 규제영향분석서, 미첨부 확인서 등
     exclude = ("공고", "조문별", "이유서", "규제영향", "미첨부", "확인서", "사전예고기간")
     if any(x in label for x in exclude):
         return False
-    # 포함: 일부개정고시안, 개정고시안 (규정 본문·신구조문 대비표 포함)
-    return "일부개정고시안" in label or "개정고시안" in label
+    # 포함: 일부/전부/개정고시안, 제정고시안 (본 고시안 = 규정 본문·신구조문 대비표 수록)
+    return "개정고시안" in label or "제정고시안" in label
 
 
 def _is_legislation_decree_pdf_label(label: str) -> bool:
@@ -251,16 +255,66 @@ def fetch_notice_body_text(detail_url: str) -> str:
         el = soup.select_one(sel)
         if el and ("개정이유" in el.get_text() or "주요내용" in el.get_text()):
             return _get_text(el, strip=True)
-    # fallback: 첨부파일 링크 이전까지 body 텍스트
+    # fallback: 첨부파일 링크 이전까지 body 텍스트 — 단, 개정이유/주요내용이 실제로
+    # 들어있을 때만. (FSC 상세는 본문이 비고 내용이 첨부 PDF에 있는 경우가 많아,
+    # 네비게이션 메뉴를 본문으로 오인 반환하지 않도록 한다.)
     body = soup.find("body")
     if body:
         text = body.get_text(separator="\n", strip=False)
-        # "첨부파일" 이전까지만 (첨부 목록 제외)
         idx = text.find("첨부파일")
         if idx > 0:
             text = text[:idx]
-        return text.strip()
+        text = text.strip()
+        # 네비게이션·링크에 들어간 '개정이유' 단어가 아니라, 본문 번호 구조가 있을 때만 인정
+        if re.search(r"1\s*\.\s*개정\s*이유", text) or re.search(r"2\s*\.\s*주요\s*내용", text):
+            return text
     return ""
+
+
+def fetch_reason_main_from_attachment_pdfs(
+    detail_url: str,
+    session: Optional[requests.Session] = None,
+) -> tuple[List[str], List[str], List[str]]:
+    """게시글 본문이 비었을 때 보조: 조문별 이유서/공고문 PDF에서 개정이유·주요내용 추출.
+
+    Returns:
+        (reason_sections, main_sections, combined_sections)
+        구조 파싱 성공 시 reason/main, 실패 시 정제 전문을 combined로 반환(빈 안내서 방지).
+    """
+    from ..parsers.legislation_parser import (
+        parse_reason_main_from_gosi_reason_pdf,
+        _restore_korean_spaces,
+    )
+
+    try:
+        pdf_texts = fetch_notice_pdf_texts(detail_url, session=session)
+    except Exception:
+        return [], [], []
+    if not pdf_texts:
+        return [], [], []
+
+    # 우선순위: 조문별 (제)개정이유서 > 사전예고 단축 확인서(신청사유 포함) > 기타 본문성 PDF
+    def _rank(label: str) -> int:
+        if "이유서" in label or "조문별" in label:
+            return 0
+        if "확인서" in label and "미첨부" not in label:
+            return 1
+        if "공고문" in label or "고시안" in label:
+            return 3
+        return 2
+
+    best_combined = ""
+    for label, text in sorted(pdf_texts, key=lambda lt: _rank(lt[0])):
+        reason, main = parse_reason_main_from_gosi_reason_pdf(text)
+        if reason or main:
+            return reason, main, reason + main
+        if len(text.strip()) > len(best_combined):
+            best_combined = text.strip()
+
+    if best_combined:
+        cleaned = _restore_korean_spaces(best_combined)
+        return [], [], [cleaned]
+    return [], [], []
 
 
 def fetch_fsc_notice_pdf_urls(detail_url: str) -> List[tuple[str, str]]:

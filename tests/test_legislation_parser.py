@@ -3,7 +3,37 @@ from __future__ import annotations
 
 import pytest
 
-from law_change_auto.parsers.legislation_parser import parse_reason_main_from_notice_body
+from law_change_auto.parsers.legislation_parser import (
+    parse_reason_main_from_notice_body,
+    parse_reason_main_from_gosi_reason_pdf,
+)
+
+
+class TestParseReasonMainFromGosiReasonPdf:
+    """규정변경예고 조문별 제·개정이유서 PDF 파싱 (공인회계사 케이스 류)."""
+
+    def test_extracts_reason_and_main_blocks(self):
+        text = (
+            "공인회계사 실무수습기관 지정고시 전부개정고시안 조문별 제ㆍ개정이유서 "
+            "1. 공인회계사 실무수습기관 확대·정비(안 제1조) "
+            "가. 제·개정이유 ㅇ 26년 제4차 위원회 후속조치로서 실무수습기관을 확대·정비 "
+            "나. 제ㆍ개정내용 ㅇ(현행) 중앙부처, 지자체 ⇒(개선) 현행 + 추천기관 "
+            "다. 입법추진과정에서 논의된 주요내용 ㅇ해당없음"
+        )
+        reason, main = parse_reason_main_from_gosi_reason_pdf(text)
+        assert reason and any("후속조치" in r for r in reason)
+        assert main and any("개선" in m for m in main)
+
+    def test_empty_on_short_text(self):
+        assert parse_reason_main_from_gosi_reason_pdf("짧음") == ([], [])
+
+    def test_dedup_identical_blocks(self):
+        text = (
+            "가. 개정이유 ㅇ 동일한 사유 내용입니다 나. 개정내용 ㅇ 내용1 "
+            "2. 다음조문 가. 개정이유 ㅇ 동일한 사유 내용입니다 나. 개정내용 ㅇ 내용2"
+        )
+        reason, _ = parse_reason_main_from_gosi_reason_pdf(text)
+        assert len(reason) == 1  # 동일 이유 블록 중복 제거
 
 
 class TestParseReasonMainFromNoticeBody:

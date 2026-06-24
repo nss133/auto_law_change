@@ -15,6 +15,7 @@ from ..fetchers.legislation_fetcher import (
     expand_fsc_combined_notice_metas,
     fetch_fsc_legislation_list,
     fetch_notice_body_text,
+    fetch_reason_main_from_attachment_pdfs,
 )
 from ..fetchers.legislation_notice_fetcher import (
     build_legislation_detail_from_moleg_for_fsc_split,
@@ -471,19 +472,30 @@ def collect_details_for_range(
 
     all_metas = [*law_metas, *admin_rule_metas]
 
-    # 달력 API(calendarInfoR)로 날짜별 교차검증 — lsi_seq 포함으로 매칭 정확도 향상
+    # 달력 API(calendarInfoR)로 날짜별 교차검증 — lsi_seq 포함으로 매칭 정확도 향상.
+    # 하루당 1 HTTP라 기간이 길면 병렬로 단축.
     try:
-        cal_all: List[LawChangeMeta] = []
-        cal_seen: set[str] = set()
+        days = []
         current = date_from
         one_day = dt.timedelta(days=1)
         while current <= date_to:
-            day_metas = fetch_calendar_laws(current)
-            for m in day_metas:
-                if m.lsi_seq and m.lsi_seq not in cal_seen:
-                    cal_seen.add(m.lsi_seq)
-                    cal_all.append(m)
+            days.append(current)
             current += one_day
+
+        def _safe_calendar(day: dt.date) -> List[LawChangeMeta]:
+            try:
+                return fetch_calendar_laws(day)
+            except Exception:
+                return []
+
+        cal_all: List[LawChangeMeta] = []
+        cal_seen: set[str] = set()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for day_metas in executor.map(_safe_calendar, days):
+                for m in day_metas or []:
+                    if m.lsi_seq and m.lsi_seq not in cal_seen:
+                        cal_seen.add(m.lsi_seq)
+                        cal_all.append(m)
         if cal_all:
             cal_missing = cross_check_and_merge(all_metas, cal_all)
             if cal_missing:
@@ -518,81 +530,8 @@ def collect_details_for_range(
                 except Exception:
                     pass
 
-    # FSC(금융위) 입법예고·규정변경예고 수집
-    try:
-        fsc_metas = fetch_fsc_legislation_list(max_items=100)
-        fsc_in_range = [
-            m for m in fsc_metas
-            if m.announcement_date and date_from <= m.announcement_date <= date_to
-        ]
-        if fsc_in_range:
-            fsc_matches = match_laws(monitored_laws, fsc_in_range, threshold=0.5)
-            fsc_matches = augment_fsc_legislation_matches(
-                monitored_laws, fsc_in_range, fsc_matches
-            )
-            if law_filter:
-                fsc_matches = [m for m in fsc_matches if law_filter in m.meta.law_name]
-
-            # 기존 details 법령명 정규화 집합 (중복 제거용)
-            existing_norm_names: set[str] = set()
-            for d in details:
-                existing_norm_names.add(re.sub(r"\s+", "", d.meta.law_name))
-
-            fsc_count = 0
-            body_by_url: dict[str, str] = {}
-            for fm in fsc_matches:
-                for meta in expand_fsc_combined_notice_metas(fm.meta):
-                    norm_name = re.sub(r"\s+", "", meta.law_name)
-                    if any(
-                        norm_name in en or en in norm_name
-                        for en in existing_norm_names
-                    ):
-                        continue
-
-                    moleg_detail = build_legislation_detail_from_moleg_for_fsc_split(
-                        meta
-                    )
-                    if moleg_detail:
-                        details.append(moleg_detail)
-                        existing_norm_names.add(norm_name)
-                        fsc_count += 1
-                        continue
-
-                    detail_url = meta.detail_url
-                    if not detail_url:
-                        continue
-                    if detail_url not in body_by_url:
-                        try:
-                            body_by_url[detail_url] = fetch_notice_body_text(detail_url)
-                        except Exception as e:
-                            print(
-                                f"[law_change_auto] FSC 본문 조회 실패 ({meta.law_name[:30]}...): {e}"
-                            )
-                            body_by_url[detail_url] = ""
-                    body_text = body_by_url[detail_url]
-                    reason_sections, main_sections, opinion_deadline = (
-                        parse_reason_main_from_notice_body(body_text)
-                    )
-
-                    combined = reason_sections + main_sections
-                    details.append(
-                        LawChangeDetail(
-                            meta=meta,
-                            reason_sections=reason_sections,
-                            main_change_sections=main_sections,
-                            combined_reason_and_main_sections=combined,
-                            article_comparisons=[],
-                            opinion_deadline=opinion_deadline,
-                            comparison_pdf_paths=[],
-                        )
-                    )
-                    existing_norm_names.add(norm_name)
-                    fsc_count += 1
-            if fsc_count:
-                print(f"[law_change_auto] FSC 입법예고/규정변경예고 (기간): {fsc_count}건 추가")
-    except Exception as e:
-        print(f"[law_change_auto] 경고: FSC 입법예고 조회 중 오류 (무시): {e}")
-
+    # FSC(금융위) 입법예고·규정변경예고는 collect_legislation_details에서 단일 수집한다.
+    # (그쪽이 PDF 첨부·kordoc 신구대비표까지 처리하는 상위 경로 — 여기서 중복 페치하지 않음.)
     return details
 
 
@@ -656,6 +595,14 @@ def process_legislation(
                 comparison_pdfs = []
 
             combined = reason_sections + main_sections
+            # 본문에서 개정이유·주요내용을 못 얻으면 첨부 PDF(조문별 이유서·공고문)에서 보완
+            if not combined:
+                r2, m2, c2 = fetch_reason_main_from_attachment_pdfs(detail_url)
+                if r2 or m2:
+                    reason_sections, main_sections = r2, m2
+                    combined = r2 + m2
+                elif c2:
+                    combined = c2
             kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
             details.append(
                 LawChangeDetail(
@@ -742,6 +689,14 @@ def collect_legislation_details(
                 comparison_pdfs = []
 
             combined = reason_sections + main_sections
+            # 본문에서 개정이유·주요내용을 못 얻으면 첨부 PDF(조문별 이유서·공고문)에서 보완
+            if not combined:
+                r2, m2, c2 = fetch_reason_main_from_attachment_pdfs(detail_url)
+                if r2 or m2:
+                    reason_sections, main_sections = r2, m2
+                    combined = r2 + m2
+                elif c2:
+                    combined = c2
             kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
             details.append(
                 LawChangeDetail(

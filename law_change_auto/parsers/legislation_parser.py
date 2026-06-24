@@ -170,6 +170,40 @@ def parse_reason_main_from_notice_body(body_text: str) -> Tuple[List[str], List[
     return reason_paras[:50], main_paras[:30], opinion_deadline
 
 
+_REASON_BLOCK_RE = re.compile(
+    r"[가-힣]?\s*\.?\s*제?\s*[·ㆍ]?\s*개정\s*이유(.*?)(?=[나다라마]\s*\.|\d+\s*\.|$)", re.S
+)
+_MAIN_BLOCK_RE = re.compile(
+    r"[가-힣]?\s*\.?\s*제?\s*[·ㆍ]?\s*개정\s*내용(.*?)(?=[다라마]\s*\.|\d+\s*\.|$)", re.S
+)
+
+
+def parse_reason_main_from_gosi_reason_pdf(text: str) -> Tuple[List[str], List[str]]:
+    """규정변경예고 '조문별 제·개정이유서' PDF 텍스트에서 개정이유·주요내용을 추출.
+
+    전형적 구조(조문별):  「가. 제·개정이유 …」「나. 제ㆍ개정내용 …」「다. …」
+    각 조문 블록의 이유/내용을 모아 반환한다. 본문(게시글)·법제처 형식과 다른 보조 경로.
+    """
+    if not text or len(text.strip()) < 30:
+        return [], []
+    cleaned = _restore_korean_spaces(text)
+
+    def _collect(pattern: re.Pattern) -> List[str]:
+        out: List[str] = []
+        seen: set[str] = set()
+        for m in pattern.finditer(cleaned):
+            blk = (m.group(1) or "").strip()
+            blk = re.sub(r"^[ㅇ○ㆍ·\-\s]+", "", blk)
+            blk = re.sub(r"\s{2,}", " ", blk).strip()
+            key = re.sub(r"\s", "", blk)[:60]
+            if len(blk) >= 8 and key not in seen:
+                seen.add(key)
+                out.append(blk)
+        return out
+
+    return _collect(_REASON_BLOCK_RE)[:30], _collect(_MAIN_BLOCK_RE)[:30]
+
+
 def _skip_comparison_row(old_text: str, new_text: str) -> bool:
     """연락처·부처명·헤더 등 대비표에 불필요한 행 스킵."""
     if not (old_text or new_text):
