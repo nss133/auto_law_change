@@ -69,7 +69,58 @@ def _gemini_enabled() -> bool:
 
 # ── Groq 설정 ────────────────────────────────────────────────
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile는 Groq에서 지원 종료(404) — 2026-08 기준 가용 모델로 교체
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_REASONING_EFFORT = "low"  # gpt-oss 계열: 추론 토큰 최소화(응답은 message.content에 유지)
+GROQ_MIN_SPACING = 3.0  # 무료 티어 TPM 대응: 직전 호출과의 최소 간격(초)
+GROQ_429_WAITS = [20, 40, 60]  # Retry-After 헤더 없을 때의 재시도 대기(초)
+_last_groq_call_ts = 0.0
+
+
+def _groq_throttle() -> None:
+    global _last_groq_call_ts
+    wait = GROQ_MIN_SPACING - (time.time() - _last_groq_call_ts)
+    if wait > 0:
+        time.sleep(wait)
+    _last_groq_call_ts = time.time()
+
+
+def _groq_post(law_name: str, payload: dict) -> Optional[dict]:
+    """Groq chat API 호출. 429 시 Retry-After(없으면 기본 대기) 존중하며 재시도."""
+    api_key = _get_groq_key()
+    if not api_key:
+        return None
+    for attempt in range(len(GROQ_429_WAITS) + 1):
+        _groq_throttle()
+        try:
+            resp = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status == 429 and attempt < len(GROQ_429_WAITS):
+                try:
+                    wait = float(e.response.headers.get("retry-after", ""))
+                except (TypeError, ValueError):
+                    wait = GROQ_429_WAITS[attempt]
+                wait = min(max(wait, 1.0), 120.0)
+                print(f"[Groq] {law_name}: 429 rate limit, {wait:.0f}초 후 재시도 ({attempt + 1}/{len(GROQ_429_WAITS)})")
+                time.sleep(wait)
+                continue
+            print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
+            return None
+        except Exception as e:
+            print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
+            return None
+    return None
 
 # ── 공통 설정 ────────────────────────────────────────────────
 MAX_INPUT_CHARS = 1500
@@ -187,40 +238,23 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
 
 def _fetch_from_groq(law_name: str, prompt: str) -> Optional[str]:
     """Groq API 호출 (Gemini 실패 시 fallback)."""
-    api_key = _get_groq_key()
-    if not api_key:
+    data = _groq_post(
+        law_name,
+        {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "temperature": 0.2,
+            "reasoning_effort": GROQ_REASONING_EFFORT,
+        },
+    )
+    if not data:
         return None
-
-    try:
-        resp = requests.post(
-            GROQ_API_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": MAX_OUTPUT_TOKENS,
-                "temperature": 0.2,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        text = (
-            resp.json()
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
-        )
-        result = _clean_text(text) if text else None
-        if result:
-            print(f"[Groq] {law_name}: 파급효과 생성 성공")
-        return result
-    except Exception as e:
-        print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
-        return None
+    text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    result = _clean_text(text) if text else None
+    if result:
+        print(f"[Groq] {law_name}: 파급효과 생성 성공")
+    return result
 
 
 _COMPARISON_MAX_INPUT = 6000  # 신구조문 추출용 입력 제한 (더 긴 텍스트 허용)
@@ -252,25 +286,22 @@ def _build_comparison_prompt(law_name: str, text: str) -> str:
 
 def _fetch_comparison_from_groq(law_name: str, prompt: str) -> list[dict] | None:
     """Groq으로 신구조문 JSON 추출 (빠른 응답, 비율 제한 완화)."""
-    api_key = _get_groq_key()
-    if not api_key:
+    data = _groq_post(
+        law_name,
+        {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": _COMPARISON_MAX_OUTPUT,
+            "temperature": 0.1,
+            "reasoning_effort": GROQ_REASONING_EFFORT,
+            "response_format": {"type": "json_object"},
+        },
+    )
+    if not data:
         return None
     try:
-        resp = requests.post(
-            GROQ_API_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": _COMPARISON_MAX_OUTPUT,
-                "temperature": 0.1,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        import json, re
+        raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        import json
         # json_object 모드는 최상위 객체를 반환할 수 있음 — 배열 추출
         parsed = json.loads(raw)
         if isinstance(parsed, list):
