@@ -58,7 +58,11 @@ def match_laws(
     ]
 
     for meta in metas:
-        norm_meta = _normalize_name(meta.law_name)
+        name = meta.law_name
+        if meta.category == '입법예고':
+            name = re.sub(r'[「」｢｣“”]', '', name)
+            name = re.sub(r'\s*(일부개정|전부개정|입법예고|규정변경예고).*$', '', name).strip()
+        norm_meta = _normalize_name(name)
         if not norm_meta:
             continue
 
@@ -114,4 +118,3 @@ def augment_fsc_legislation_matches(
                 break
 
     return out
-

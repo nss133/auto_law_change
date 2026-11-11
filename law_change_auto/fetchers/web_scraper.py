@@ -389,12 +389,16 @@ def fetch_calendar_laws(
             )
             resp.encoding = "utf-8"
             if resp.status_code != 200:
+                from ..services.diagnostics import warn
+                warn(f'달력 {target_date} fsort={fsort} HTTP {resp.status_code}')
                 print(
                     f"[law_change_auto] calendarInfoR 응답 오류: "
                     f"fsort={fsort}, status={resp.status_code}"
                 )
                 continue
         except (requests.ConnectionError, requests.Timeout) as e:
+            from ..services.diagnostics import warn
+            warn(f'달력 {target_date} fsort={fsort} 요청 실패: {e}')
             print(f"[law_change_auto] calendarInfoR 요청 실패: fsort={fsort}, {e}")
             continue
 
@@ -409,6 +413,15 @@ def fetch_calendar_laws(
                 continue
             if meta is None:
                 continue
+            # 응답에 다른 탭의 행도 들어온다. 조회 라벨이 아니라 실제 날짜로 검증.
+            meta.calendar_event_date = target_date
+            if meta.effective_date == target_date:
+                meta.change_type = '시행'
+            elif meta.announcement_date == target_date:
+                meta.change_type = '공포'
+            else:
+                # 한시조문 등은 일반 시행으로 단정하지 않고 확인 대상으로 보존.
+                meta.change_type = '기타'
             # lsi_seq 기준 중복 제거
             if meta.lsi_seq:
                 if meta.lsi_seq in seen_seqs:

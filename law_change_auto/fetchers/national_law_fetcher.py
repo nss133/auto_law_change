@@ -3,6 +3,41 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import Dict, List
+from ..services.diagnostics import warn
+
+
+def _request_all_pages(params, *, effective_start=None):
+    """Merge search pages; never silently treat page 1 as the whole range."""
+    import xml.etree.ElementTree as ET
+    merged = ET.Element('results')
+    page = 1
+    seen = set()
+    while True:
+        root = _request_law_search({**params, 'page': str(page)})
+        fingerprint = ET.tostring(root)
+        if fingerprint in seen:
+            raise RuntimeError('검색 API가 동일 페이지를 반복 반환함')
+        seen.add(fingerprint)
+        merged.extend(list(root))
+        total = root.findtext('.//totalCnt') or root.findtext('.//totalCount')
+        if total is None:
+            raise RuntimeError('검색 API 전체 건수 누락: 완전성 확인 불가')
+        if page == 1 or page % 5 == 0:
+            print(f"[law_change_auto] API {params.get('target')} {params.get('sort', '기간')} page={page} total={total}", flush=True)
+        if effective_start is not None and int(total):
+            dates = [_parse_yyyymmdd(e.text) for e in root.iter('시행일자')]
+            dates = [d for d in dates if d]
+            if not dates:
+                raise RuntimeError('시행일 정렬 조회에 시행일 없음: 범위 확인 불가')
+            if dates != sorted(dates, reverse=True):
+                raise RuntimeError('행정규칙 시행일 내림차순 응답 불일치')
+            if min(dates) < effective_start:
+                return merged
+        if page * int(params.get('display', '100')) >= int(total):
+            return merged
+        page += 1
+        if page > 1000:
+            raise RuntimeError('검색 API 페이지 안전 한도 초과')
 
 from ..models import LawChangeMeta
 from ..config.monitored_laws_loader import MonitoredLaw
@@ -241,10 +276,11 @@ def get_recent_law_changes_range(
 
     for key, change_type in (("efYd", "시행"), ("ancYd", "공포")):
         try:
-            root = _request_law_search(
-                {"target": "lsStmd", key: range_str, "display": "100", "page": "1"}
+            root = _request_all_pages(
+                {"target": "lsStmd", key: range_str, "display": "100"}
             )
-        except Exception:
+        except Exception as exc:
+            warn(f'기간 법령 API {key} 수집 실패: {exc}')
             continue
         for elem in root.iter():
             law_name = _get_child_text(elem, "법령명")
@@ -299,10 +335,14 @@ def get_recent_admin_rule_changes_range(
         base_params: Dict[str, str] = {"target": "admrul", "display": "100", "page": "1"}
         if nw_val:
             base_params["nw"] = nw_val
-        for key in ("prmlYd", "efYd"):
+        for key in ("prmlYd", "effective_sorted"):
             try:
-                root = _request_law_search({**base_params, key: range_str})
-            except Exception:
+                # admrul은 efYd 기간검색을 지원하지 않는다. efdes 정렬 후 경계에서 중단.
+                root = (_request_all_pages({**base_params, 'sort': 'efdes'}, effective_start=date_from)
+                        if key == 'effective_sorted' else
+                        _request_all_pages({**base_params, key: range_str}))
+            except Exception as exc:
+                warn(f'기간 행정규칙 API {key}{nw_label} 수집 실패: {exc}')
                 continue
             for m in _parse_admin_rule_metas(
                 root, source=f"law.go.kr:admrul({key}{nw_label})"
@@ -312,8 +352,7 @@ def get_recent_admin_rule_changes_range(
                     continue
                 seen_keys.add(key_tuple)
                 if m.effective_date or m.announcement_date:
-                    d = m.effective_date or m.announcement_date
-                    if date_from <= d <= date_to:
+                    if any(d and date_from <= d <= date_to for d in (m.effective_date, m.announcement_date)):
                         metas.append(m)
     return metas
 
@@ -438,4 +477,3 @@ def get_admin_rule_changes_for_monitored(
                 )
 
     return metas
-

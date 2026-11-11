@@ -292,6 +292,7 @@ def extract_comparison_via_llm(
 
 def extract_comparison_from_pdf_paths(
     comparison_pdfs: list[tuple[str, str]],
+    *, llm_fallback: bool = False,
 ) -> list[ArticleComparisonRow]:
     """comparison_pdf_paths [(label, saved_path), ...] 전체에서 신구대비표를 추출한다.
 
@@ -300,7 +301,7 @@ def extract_comparison_from_pdf_paths(
     all_rows: list[ArticleComparisonRow] = []
     for label, saved_path in comparison_pdfs:
         try:
-            rows = extract_comparison_from_file(saved_path, law_name=label, llm_fallback=True)
+            rows = extract_comparison_from_file(saved_path, law_name=label, llm_fallback=llm_fallback)
             if rows:
                 print(f"[kordoc] {label}: {len(rows)}행 추출")
                 all_rows.extend(rows)

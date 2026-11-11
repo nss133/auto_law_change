@@ -40,7 +40,7 @@ from ..fetchers.content_fetcher import (
     fetch_revision_hwp_text,
     fetch_revision_reason_from_ls_rvs_rsn_list,
 )
-from .kordoc_comparison import extract_comparison_from_pdf_paths, extract_comparison_via_llm
+from .kordoc_comparison import extract_comparison_from_pdf_paths
 from ..fetchers.briefing_db_fetcher import (
     get_briefing_notices_for_monitored,
     fetch_briefing_notice_detail,
@@ -266,26 +266,26 @@ def collect_details_for_date(
             print(f"[law_change_auto] 신구법비교 조회 실패: {meta.law_name}: {e}")
 
         if not revision_html and not revision_text_from_list and not old_new_xml:
+            details.append(LawChangeDetail(meta=meta, source_limit='개정 원문을 확보하지 못함.'))
             continue
 
-        detail = parse_law_change(
-            meta, revision_html, old_new_xml, revision_text_from_list=revision_text_from_list
-        )
+        try:
+            detail = parse_law_change(
+                meta, revision_html, old_new_xml, revision_text_from_list=revision_text_from_list
+            )
+        except Exception as exc:
+            from .diagnostics import warn
+            warn(f'상세 파싱 실패: {meta.law_name}: {type(exc).__name__}')
+            details.append(LawChangeDetail(meta=meta, source_limit='상세 파싱 실패로 원문 확인을 보류함.'))
+            continue
         details.append(detail)
         if old_new_xml and not detail.article_comparisons:
             print(f"[law_change_auto] 신구대비표 API 응답 있으나 파싱 결과 0행: {meta.law_name} lsi={meta.lsi_seq}")
 
-        # XML API로 신구대비표 확보 실패 시 → 개정문 HWP + LLM fallback
+        # Collection is deterministic; a missing comparison needs review, not an untracked LLM call.
         if not detail.article_comparisons:
-            try:
-                hwp_text = fetch_revision_hwp_text(meta)
-                if hwp_text:
-                    llm_rows = extract_comparison_via_llm(hwp_text, meta.law_name)
-                    if llm_rows:
-                        detail.article_comparisons = llm_rows
-                        print(f"[kordoc+LLM] {meta.law_name}: 개정문 HWP → {len(llm_rows)}행 추출")
-            except Exception as e:
-                print(f"[kordoc+LLM] {meta.law_name}: fallback 실패: {e}")
+            from .diagnostics import warn
+            warn(f'신구조문 미확보: {meta.law_name}; 원문 대비표 확인 필요')
 
     if law_filter:
         norm_filter = law_filter.replace(" ", "")
@@ -449,8 +449,9 @@ def _fetch_detail_for_meta(
             pass
     try:
         old_new_xml = fetch_old_new_html(meta)
-    except Exception:
-        pass
+    except Exception as exc:
+        from .diagnostics import warn
+        warn(f'신구조문 조회 실패: {meta.law_name}: {type(exc).__name__}')
     return (m, revision_text_from_list, revision_html, old_new_xml)
 
 
@@ -485,7 +486,9 @@ def collect_details_for_range(
         def _safe_calendar(day: dt.date) -> List[LawChangeMeta]:
             try:
                 return fetch_calendar_laws(day)
-            except Exception:
+            except Exception as exc:
+                from .diagnostics import warn
+                warn(f'달력 {day} 수집 실패: {exc}')
                 return []
 
         cal_all: List[LawChangeMeta] = []
@@ -522,13 +525,19 @@ def collect_details_for_range(
                 try:
                     m, revision_text, revision_html, old_new_xml = future.result()
                     if not revision_html and not revision_text and not old_new_xml:
+                        from .diagnostics import warn
+                        warn(f'상세 본문 없음: {m.meta.law_name}')
+                        details.append(LawChangeDetail(meta=m.meta))
                         continue
                     detail = parse_law_change(
                         m.meta, revision_html, old_new_xml, revision_text_from_list=revision_text
                     )
                     details.append(detail)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    from .diagnostics import warn
+                    meta = futures[future].meta
+                    warn(f'상세 수집 실패: {meta.law_name}: {type(exc).__name__}')
+                    details.append(LawChangeDetail(meta=meta, source_limit='상세 수집·파싱 실패로 원문 확인을 보류함.'))
 
     # FSC(금융위) 입법예고·규정변경예고는 collect_legislation_details에서 단일 수집한다.
     # (그쪽이 PDF 첨부·kordoc 신구대비표까지 처리하는 상위 경로 — 여기서 중복 페치하지 않음.)
@@ -540,9 +549,13 @@ def process_legislation(
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
     max_items: int = 30,
-) -> Path | None:
+    *, selection_review=None, use_llm=True, make_summary=True,
+) -> List[Path]:
     """입법예고/규정변경예고 (FSC) 조회·PDF 추출·안내서 생성."""
-    from ..docx_generator.generator import generate_guide
+    from . import diagnostics
+    diagnostics.reset()
+    if any(Path(output_dir).glob('*.docx')) or (Path(output_dir) / 'run_report.json').exists():
+        raise FileExistsError(f'기존 산출물 보존. 새 출력 폴더를 지정하세요: {output_dir}')
 
     try:
         legislation_metas = fetch_fsc_legislation_list(max_items=max_items)
@@ -603,7 +616,7 @@ def process_legislation(
                     combined = r2 + m2
                 elif c2:
                     combined = c2
-            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
+            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs, llm_fallback=False) if comparison_pdfs else []
             details.append(
                 LawChangeDetail(
                     meta=meta,
@@ -619,11 +632,12 @@ def process_legislation(
     if not details:
         return None
 
-    target_date = dt.date.today()
-    notice_id = (details[0].meta.law_id or "legislation").replace("#", "_")
-    output_file = output_dir / f"law_change_guide_legislation_{notice_id}.docx"
-    generate_guide(details, target_date, output_file)
-    return output_file
+    from ..cli import _publish_period
+    today = dt.date.today()
+    dates = [d.meta.announcement_date for d in details if d.meta.announcement_date]
+    return _publish_period(details, output_dir, min(dates) if dates else today, today,
+                           '금융위 예고', use_llm=use_llm, selection_review=selection_review,
+                           mode='legislation', make_summary=make_summary)
 
 
 def collect_legislation_details(
@@ -633,20 +647,29 @@ def collect_legislation_details(
     date_from: dt.date,
     date_to: dt.date,
     max_items: int = 100,
+    extract_comparisons: bool = True,
+    comparison_llm: bool = False,
 ) -> List[LawChangeDetail]:
     """기간 내 입법예고/규정변경예고 상세 수집."""
     try:
         legislation_metas = fetch_fsc_legislation_list(max_items=max_items)
     except Exception as e:
         print(f"[law_change_auto] 입법예고 목록 조회 실패: {e}")
+        from .diagnostics import warn
+        warn(f'입법예고 목록 수집 실패: {e}')
         return []
 
     # 예고일자 기준으로 기간 필터
+    if len(legislation_metas) >= max_items:
+        dates = [m.announcement_date for m in legislation_metas if m.announcement_date]
+        if not dates or min(dates) >= date_from:
+            from .diagnostics import warn
+            warn(f'예고 목록 {max_items}건 상한 도달: 기간 시작일까지 수집되었는지 추가 확인 필요')
     in_range = [
         m for m in legislation_metas
         if m.announcement_date and date_from <= m.announcement_date <= date_to
     ]
-    matches = match_laws(monitored_laws, in_range, threshold=0.5)
+    matches = match_laws(monitored_laws, in_range, threshold=0.8)
     matches = augment_fsc_legislation_matches(monitored_laws, in_range, matches)
     if law_filter:
         matches = [m for m in matches if law_filter in m.meta.law_name]
@@ -655,9 +678,7 @@ def collect_legislation_details(
             MatchResult(meta=m, monitored=MonitoredLaw(name=law_filter, note=None), score=1.0)
             for m in in_range if law_filter in m.law_name
         ]
-    # 기간 모드: 매칭 없어도 기간 내 입법예고 전부 포함 (종합 안내서용)
-    if not matches and in_range:
-        matches = [MatchResult(meta=m, monitored=MonitoredLaw(name=m.law_name[:30], note=None), score=0.5) for m in in_range]
+    # 매칭이 없으면 발행 대상도 없음. 무관한 예고를 전부 포함하지 않는다.
 
     details: List[LawChangeDetail] = []
     body_by_url: dict[str, str] = {}
@@ -697,7 +718,7 @@ def collect_legislation_details(
                     combined = r2 + m2
                 elif c2:
                     combined = c2
-            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs) if comparison_pdfs else []
+            kordoc_comparisons = extract_comparison_from_pdf_paths(comparison_pdfs, llm_fallback=comparison_llm) if comparison_pdfs and extract_comparisons else []
             details.append(
                 LawChangeDetail(
                     meta=meta,

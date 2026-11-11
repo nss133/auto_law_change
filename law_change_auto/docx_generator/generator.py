@@ -21,7 +21,6 @@ from docx.shared import Inches, Mm, Pt, RGBColor
 
 from ..fetchers.pdf_extractor import render_pdf_pages_to_images
 from ..models import LawChangeDetail, LawChangeDetailSeq, LawChangeMeta, TextSegment
-from ..services.gemini_client import fetch_impact_text as fetch_impact_text_gemini
 
 LINE_SPACING_BODY = 1.5
 LINE_SPACING_TITLE = 1.0
@@ -318,13 +317,11 @@ def _detail_to_docx(
     meta = detail.meta
     is_legislation = meta.category == "입법예고"
     generator.legislation_format = is_legislation
-    if meta.category == "행정규칙":
-        title_suffix = "고시 규정변경예고 안내"
-    elif meta.category == "입법예고":
-        title_suffix = "고시 규정변경예고 안내" if meta.change_type == "규정변경예고" else "입법예고 안내"
+    if detail.publication_status == '시행':
+        from dataclasses import replace
+        generator.add_title(guide_display_title(replace(meta, change_type='시행')))
     else:
-        title_suffix = "시행 안내"
-    generator.add_title(f"{meta.law_name} {title_suffix}")
+        generator.add_title(guide_display_title(meta))
 
     def _fmt_date(d: date | None) -> str:
         if not d:
@@ -359,6 +356,9 @@ def _detail_to_docx(
         reason_paras = _clean_revision_paras(detail.combined_reason_and_main_sections)
 
     main_paras = _clean_revision_paras(detail.main_change_sections or [])
+    if '타법' in (meta.amendment_type or ''):
+        reason_paras = ['타법개정입니다. 제공된 개정이유는 다른 법령 전체를 설명할 수 있어 요약에서 제외했습니다.']
+        main_paras = ['해당 법령의 실제 변경조문과 부칙을 원문에서 확인해 주세요.']
 
     # 입법예고/규정변경예고는 legal_doc_converter 형식에 맞춰 개정이유와 주요내용을 분리한다.
     if is_legislation or main_paras:
@@ -387,11 +387,9 @@ def _detail_to_docx(
         impact_num = "2"
         table_num = "3"
 
-    # 파급효과 (Gemini → 실패 시 기본 문구)
-    fallback_impact = f"{meta.law_name} 개정에 따른 실무 영향을 면밀히 검토하여 관련 업무에 반영 바람."
-    impact_text = (
-        fetch_impact_text_gemini(meta.law_name, reason_paras, main_paras) or fallback_impact
-    )
+    # Rendering is deterministic and never makes hidden API calls.
+    from ..services.enrichment import impact_for_document
+    impact_text = impact_for_document(detail)
     generator.add_section(
         impact_num,
         "파급효과",
@@ -425,11 +423,11 @@ def _detail_to_docx(
 def guide_display_title(meta: LawChangeMeta) -> str:
     """안내서 제목 문자열(파일명과 동일한 접미어, 법령명은 잘리지 않음). 목차용."""
     if meta.category == "행정규칙":
-        suffix = "고시 규정변경예고 안내"
+        suffix = "시행 안내" if meta.change_type == "시행" else "발령 안내"
     elif meta.category == "입법예고":
         suffix = "고시 규정변경예고 안내" if meta.change_type == "규정변경예고" else "입법예고 안내"
     else:
-        suffix = "시행 안내"
+        suffix = {"시행": "시행 안내", "공포": "공포 안내"}.get(meta.change_type, "변경 안내")
     return f"{(meta.law_name or '법령').strip()} {suffix}"
 
 
@@ -438,29 +436,9 @@ def write_period_toc_docx(
     period_line: str,
     numbered_lines: List[str],
 ) -> Path:
-    """종합 기간 모드 산출물 폴더용 목차 docx."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = Document()
-    p0 = doc.add_paragraph()
-    r0 = p0.add_run("법령제·개정 안내서 목차")
-    r0.bold = True
-    r0.font.size = Pt(14)
-    p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p0.paragraph_format.space_after = PARAGRAPH_SPACING_AFTER
-
-    p1 = doc.add_paragraph()
-    p1.add_run(period_line)
-    p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _apply_body_format(p1)
-
-    doc.add_paragraph()
-    for line in numbered_lines:
-        p = doc.add_paragraph()
-        p.add_run(line)
-        _apply_body_format(p)
-
-    doc.save(str(output_path))
-    return output_path
+    """지정 참고 양식을 보존한 목차."""
+    from .reference import render_toc
+    return render_toc(output_path, period_line, numbered_lines)
 
 
 def generate_guide(
@@ -468,16 +446,6 @@ def generate_guide(
     target_date: date,
     output_path: Path,
 ) -> Path:
-    """LawChangeDetail를 DOCX로 변환한다. 여러 건이면 각 건마다 페이지로 구분하여 삽입."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    generator = DocxGenerator()
-    if details:
-        for i, detail in enumerate(details):
-            if i > 0:
-                generator.add_page_break()
-            _detail_to_docx(detail, target_date, generator)
-    else:
-        generator.add_title("법령제·개정 안내서")
-        generator.add_metadata("", "", "", date_str=target_date.strftime("%y. %m."))
-    generator.save(str(output_path))
-    return output_path
+    """내용만 교체하며 지정 참고 패키지·문단 역할을 보존함. 네트워크 호출 없음."""
+    from .reference import render_guides
+    return render_guides(details, target_date, output_path)

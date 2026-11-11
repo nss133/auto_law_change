@@ -36,9 +36,14 @@ env/
 # 프로젝트별
 output/
 *.docx
+!templates/guide_reference.docx
+!templates/summary_reference.docx
 *.html
 # data/monitored_laws.xlsx는 템플릿으로 포함
+data/*.xlsx.bak*
 
 # 로컬 설정 (API 키 등)
 .env
 .env.local
+.codex/
+.omc/

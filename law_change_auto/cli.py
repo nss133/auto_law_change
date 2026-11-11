@@ -8,6 +8,7 @@ import os
 import re
 import requests
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import List, Set, Tuple
@@ -32,6 +33,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="국가법령정보센터 기준 법령/행정규칙/입법예고 변경을 조회하여 법령제·개정 안내서(docx)를 생성합니다."
     )
+    policy = parser.add_mutually_exclusive_group()
+    policy.add_argument('--detailed-guides', action='store_true',
+                        help='시행 법령군별로 묶는 기존 방식(명시 선택). 기본은 개별본+목차+요약.')
+    policy.add_argument('--digest-only', action='store_true', help='개별 안내서 없이 요약만 생성(명시 선택).')
     parser.add_argument(
         "--date",
         type=str,
@@ -42,7 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--date-from",
         type=str,
         default="",
-        help="기간 시작일 (예: 2025-10-01). --date-to와 함께 사용 시 기간 내 각 날짜별 DOCX 생성.",
+        help="기간 시작일 (예: 2025-10-01). --date-to와 함께 사용 시 개별본·목차·종합요약 생성.",
     )
     parser.add_argument(
         "--date-to",
@@ -95,9 +100,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-summary-llm",
         action="store_true",
-        help="요약 docx의 한 줄 요약을 LLM 대신 본문 추출로만 생성합니다(빠름).",
+        help="요약은 본문 추출로 생성. 기간 모드에서는 상세 파급효과 AI 호출도 생략합니다.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument('--selection-review', type=Path,
+                        help='원문 해시에 결합된 후보별 선별 검토 JSON. 자동 분류의 적용 조건을 확인한 뒤 사용.')
+    args = parser.parse_args(argv)
+    if bool(args.date_from) != bool(args.date_to):
+        parser.error('--date-from과 --date-to를 함께 지정해야 함. 단일 일자로 대신 실행하지 않음.')
+    if (args.digest_only or args.detailed_guides) and not args.date_from:
+        parser.error('--digest-only/--detailed-guides는 기간 모드에서만 사용함.')
+    return args
 
 
 def _resolve_target_date(value: str) -> dt.date:
@@ -109,6 +121,12 @@ def _resolve_target_date(value: str) -> dt.date:
 def _validate_environment(monitored_laws: List[MonitoredLaw]) -> int:
     """로컬 실행 전 점검. 네트워크 호출 없이 구성 상태만 확인한다."""
     checks: list[tuple[str, bool, str]] = []
+    from .docx_generator.reference import reference_path
+    try:
+        reference_path()
+        checks.append(('지정 DOCX 양식·해시', True, '보존 템플릿 일치'))
+    except (OSError, ValueError) as exc:
+        checks.append(('지정 DOCX 양식·해시', False, str(exc)))
 
     checks.append(
         (
@@ -138,7 +156,7 @@ def _validate_environment(monitored_laws: List[MonitoredLaw]) -> int:
                 os.getenv("GEMINI_API_KEY", "").strip()
                 or os.getenv("GROQ_API_KEY", "").strip()
             ),
-            "없으면 기본 파급효과 문구 사용",
+            "없으면 파급효과 생성 보류·배포 불가",
         )
     )
 
@@ -191,9 +209,12 @@ def _detail_report_item(detail: LawChangeDetail, output_file: Path | None = None
         "announcement_date": _date_to_iso(meta.announcement_date),
         "effective_date": _date_to_iso(meta.effective_date),
         "source": meta.source,
+        "detail_url": meta.detail_url,
+        "amendment_type": meta.amendment_type,
         "law_id": meta.law_id,
         "lsi_seq": meta.lsi_seq,
         "admrul_seq": meta.admrul_seq,
+        "calendar_event_date": _date_to_iso(meta.calendar_event_date),
         "opinion_deadline": detail.opinion_deadline,
         "reason_count": len(detail.reason_sections),
         "main_change_count": len(detail.main_change_sections),
@@ -241,6 +262,10 @@ def _write_run_report(
         encoding="utf-8",
     )
     print(f"[law_change_auto] 실행 리포트: {report_path.name}")
+    from .services.delivery import write_manifest
+    write_manifest(output_dir, details, created,
+                   {id(d): detail_files[i] for i, d in enumerate(details) if i < len(detail_files)}, report)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     return report_path
 
 
@@ -249,12 +274,17 @@ def _process_single_date(
     output_dir: Path,
     monitored_laws: List[MonitoredLaw],
     law_filter: str,
-    create_example_if_empty: bool = True,
+    create_example_if_empty: bool = False,
     no_web_check: bool = False,
     make_summary: bool = True,
     summary_use_llm: bool = True,
+    selection_review=None,
 ) -> List[Path]:
     """단일 날짜에 대한 변경 조회·파싱·DOCX 생성. `목차.docx` 및 `N. {법령명} … 안내.docx` 목록."""
+    from .services import diagnostics
+    diagnostics.reset()
+    if any(Path(output_dir).glob('*.docx')) or (Path(output_dir) / 'run_report.json').exists():
+        raise FileExistsError(f'기존 산출물 보존. 새 --output-dir을 지정하세요: {output_dir}')
     details = collect_details_for_date(
         target_date, monitored_laws, law_filter, no_web_check=no_web_check
     )
@@ -297,6 +327,7 @@ def _process_single_date(
         mode="single-date",
         make_summary=make_summary,
         summary_use_llm=summary_use_llm,
+        selection_review=selection_review,
     )
     _download_legislation_notice_pdf_attachments(details, output_dir)
     return created
@@ -304,28 +335,8 @@ def _process_single_date(
 
 def _filename_for_detail(detail: LawChangeDetail, used: Set[str], max_base_len: int = 50) -> str:
     """법령 제목 기반 파일명 생성. 예: '보험업법 시행령 시행 안내.docx'"""
-    meta = detail.meta
-    if meta.category == "행정규칙":
-        suffix = "고시 규정변경예고 안내"
-    elif meta.category == "입법예고":
-        suffix = "고시 규정변경예고 안내" if meta.change_type == "규정변경예고" else "입법예고 안내"
-    else:
-        suffix = "시행 안내"
-
-    base = (meta.law_name or "법령").strip()
-    base = re.sub(r"[\"*/:<>?\\|]", "_", base)
-    base = re.sub(r"\s+", " ", base).strip()
-    if len(base) > max_base_len:
-        base = base[: max_base_len - 2].rstrip() + "…"
-    name = f"{base} {suffix}.docx"
-    if name in used:
-        for i in range(2, 100):
-            candidate = f"{base} {suffix}_{i}.docx"
-            if candidate not in used:
-                name = candidate
-                break
-    used.add(name)
-    return name
+    from .services.publication import safe_filename
+    return safe_filename(guide_display_title(detail.meta), used)
 
 
 def _detail_sort_date_for_toc(detail: LawChangeDetail, fallback: dt.date) -> dt.date:
@@ -369,67 +380,16 @@ def _write_guides_numbered_with_toc(
     make_summary: bool = True,
     summary_use_llm: bool = True,
     issue_date: dt.date | None = None,
+    selection_review=None,
 ) -> List[Path]:
     """건당 `N. {법령명} … 안내.docx` + `목차.docx`. 단일 일자·기간 모드 공통.
 
     issue_date: 안내서·요약에 찍히는 발행월(법무팀 발행 기준). 기간 모드에서는 시작월을
     쓰며, 미지정 시 guide_date를 사용한다. (시행일 등 본문 날짜와는 무관)
     """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    issue = issue_date or guide_date
-    sorted_details = _sort_details_for_period_toc(details, sort_fallback)
-    used_names: Set[str] = set()
-    created: List[Path] = []
-    toc_pairs: List[Tuple[LawChangeDetail, Path]] = []
-
-    for i, detail in enumerate(sorted_details, start=1):
-        filename = _filename_for_detail(detail, used_names)
-        numbered_filename = f"{i}. {filename}"
-        output_file = output_dir / numbered_filename
-        generate_guide([detail], issue, output_file)
-        created.append(output_file)
-        toc_pairs.append((detail, output_file))
-
-    toc_lines: List[str] = []
-    for i, (detail, out_path) in enumerate(toc_pairs, start=1):
-        sd = _detail_sort_date_for_toc(detail, sort_fallback)
-        date_fmt = f"{sd.year}. {sd.month}. {sd.day}."
-        title = guide_display_title(detail.meta)
-        toc_lines.append(f"{i}. {date_fmt} {title} ({out_path.name})")
-
-    toc_path = output_dir / "목차.docx"
-    write_period_toc_docx(toc_path, period_line, toc_lines)
-    created.insert(0, toc_path)
-
-    if make_summary:
-        try:
-            from .docx_generator.summary_generator import generate_summary_docx
-
-            summary_path = output_dir / "법령제개정_주요내용_요약.docx"
-            result = generate_summary_docx(
-                sorted_details,
-                summary_path,
-                period_line=period_line,
-                guide_date=guide_date,
-                issue_date=issue,
-                use_llm=summary_use_llm,
-            )
-            if result:
-                created.append(result)
-                print(f"[law_change_auto] 주요내용 요약 생성: {result.name}")
-        except Exception as e:
-            print(f"[law_change_auto] 주요내용 요약 생성 실패(무시): {e}")
-
-    _write_run_report(
-        output_dir,
-        mode=mode,
-        period_line=period_line,
-        details=sorted_details,
-        created=created,
-        guide_date=guide_date,
-    )
-    return created
+    return _publish_period(details, output_dir, guide_date, guide_date, period_line,
+                           make_summary=make_summary, use_llm=summary_use_llm,
+                           selection_review=selection_review, mode=mode)
 
 
 def _download_legislation_notice_pdf_attachments(
@@ -474,28 +434,33 @@ def _process_comprehensive_period(
     *,
     make_summary: bool = True,
     summary_use_llm: bool = True,
+    detailed_guides: bool = False,
+    digest_only: bool = False,
+    selection_review=None,
 ) -> List[Path]:
-    """기간 내 법령·행정규칙·입법예고를 건별로 안내서 1개씩 생성. (기간 API + 병렬로 단축)"""
+    """기간 수집 후 개별 안내서·목차·요약 초안 생성. 다른 정책은 명시 선택함."""
+    from .services import diagnostics
+    diagnostics.reset()
+    if any(Path(output_dir).glob('*.docx')) or (Path(output_dir) / 'run_report.json').exists():
+        raise FileExistsError(f'기존 산출물을 보존합니다. 새 --output-dir을 지정하세요: {output_dir}')
+    started = time.perf_counter()
     all_details: List[LawChangeDetail] = collect_details_for_range(
         date_from, date_to, monitored_laws, law_filter
     )
 
+    collected = time.perf_counter()
     legis_details = collect_legislation_details(
-        output_dir, monitored_laws, law_filter, date_from, date_to
+        output_dir, monitored_laws, law_filter, date_from, date_to, extract_comparisons=True,
+        comparison_llm=False
     )
     all_details.extend(legis_details)
 
-    # 중복 제거: collect_details_for_range와 collect_legislation_details 양쪽에서 FSC를 수집하므로
-    # 중복 발견 시 comparison_pdf_paths가 있는 버전의 PDF 정보를 기존 버전에 보완(머지)
-    seen_seqs: dict[str, int] = {}  # seq_key → deduped index
+    # 출처 유형 + 개정 버전 기준 중복 제거; 다른 개정 버전은 유지한다.
+    seen_seqs: dict[tuple, int] = {}
     deduped: List[LawChangeDetail] = []
     for d in all_details:
-        seq_key = (
-            d.meta.lsi_seq
-            or d.meta.admrul_seq
-            or d.meta.law_id
-            or f"{d.meta.law_name}_{d.meta.announcement_date}"
-        )
+        seq_key = (d.meta.category, d.meta.lsi_seq or d.meta.admrul_seq
+                   or (d.meta.law_id, d.meta.law_name, d.meta.announcement_date, d.meta.effective_date))
         if seq_key in seen_seqs:
             existing = deduped[seen_seqs[seq_key]]
             # 이미 저장된 버전에 PDF paths 보완
@@ -511,30 +476,139 @@ def _process_comprehensive_period(
         print(f"[law_change_auto] 중복 제거: {len(all_details)}건 → {len(deduped)}건")
     all_details = deduped
 
-    if not all_details:
-        print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
-        return []
-
     period_line = (
         f"{date_from.year}. {date_from.month}. {date_from.day}. "
         f"~ {date_to.year}. {date_to.month}. {date_to.day}."
     )
-    created = _write_guides_numbered_with_toc(
-        all_details,
-        output_dir,
-        guide_date=date_to,
-        period_line=period_line,
-        sort_fallback=date_to,
-        mode="period",
-        make_summary=make_summary,
-        summary_use_llm=summary_use_llm,
-        issue_date=date_from,
-    )
-    _download_legislation_notice_pdf_attachments(all_details, output_dir)
+    return _publish_period(all_details, output_dir, date_from, date_to, period_line,
+                           detailed_guides=detailed_guides, digest_only=digest_only, make_summary=make_summary,
+                           use_llm=summary_use_llm, selection_review=selection_review, timings={
+                               'law_collection_seconds': round(collected-started, 2),
+                               'notice_collection_seconds': round(time.perf_counter()-collected, 2)})
+
+
+def _publish_period(details, output_dir, start, end, period_line, *,
+                    detailed_guides=False, digest_only=False, make_summary=True, use_llm=True, timings=None,
+                    selection_review=None, mode='period', reuse_verified=False,
+                    enrich_candidate_ids=None, progress=None):
+    from .services.publication import classify, group_effective, safe_filename
+    from .services.enrichment import enrich, source_limit, mark_source_conflicts, reusable_draft
+    from .services.diagnostics import snapshot
+    from .docx_generator.summary_generator import generate_summary_docx
+    from .services.selection import select_candidates, write_registry, SELECTION_POLICY, candidate_id
+    begun = time.perf_counter()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Reusing a directory would leave stale individual guides beside the new digest.
+    if any(output_dir.glob('*.docx')) or (output_dir / 'run_report.json').exists():
+        raise FileExistsError(f'기존 산출물을 보존합니다. 새 --output-dir을 지정하세요: {output_dir}')
+    from dataclasses import asdict
+    status_order = {'시행': 0, '향후 시행': 1, '공포·발령': 2, '예고': 3, '별도 확인': 4}
+    details = sorted(details, key=lambda d: (status_order[classify(d, start, end)],
+        (d.meta.effective_date if classify(d, start, end) == '시행' else
+         d.meta.announcement_date if classify(d, start, end) != '별도 확인' else
+         d.meta.calendar_event_date) or end, d.meta.law_name, d.meta.lsi_seq or ''))
+    mark_source_conflicts(details)
+    for d in details:
+        d.publication_status = classify(d, start, end)
+    (output_dir / 'collected_details.json').write_text(
+        json.dumps([asdict(d) for d in details], ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    candidates = details
+    details = select_candidates(candidates, selection_review)
+    for d in candidates:
+        if d.selection['status'] != 'priority':
+            d.summary_text = None
+            d.impact_analysis = None
+            d.impact_correction = {}
+            d.impact_evidence = {'status': 'not_selected'}
+    groups = group_effective(details, start, end, load_monitored_laws())
+    file_map, created, used = {}, [], set()
+    hits = 0
+    individual = not digest_only and not detailed_guides
+    if digest_only and detailed_guides:
+        raise ValueError('digest-only와 법령군별 상세본은 동시에 선택할 수 없음')
+    for i, d in enumerate(details, 1):
+        if progress:
+            progress(f'초안 확인 {i}/{len(details)} · {d.meta.law_name}')
+        d.publication_status = classify(d, start, end)
+        limit = source_limit(d)
+        if limit:
+            d.summary_text = limit
+            d.impact_analysis = None
+            d.impact_evidence = {'status': 'withheld_source_limit', 'reason': limit}
+            continue
+        needs_impact = individual or detailed_guides and d.publication_status == '시행'
+        targeted = enrich_candidate_ids is None or candidate_id(d) in enrich_candidate_ids
+        if reuse_verified and reusable_draft(d, impact=needs_impact):
+            d.impact_evidence = {**d.impact_evidence, 'reused_response': True, 'cache_hit': False}
+        elif use_llm and targeted and (make_summary or needs_impact):
+            print(f'[law_change_auto] 초안 {i}/{len(details)}: {d.meta.law_name}', flush=True)
+            hits += enrich(d, output_dir.parent / '.draft_cache', impact=needs_impact)
+        else:
+            d.summary_text = None
+            d.impact_analysis = None
+            d.impact_correction = {}
+            d.impact_evidence = {'status': 'not_retried' if use_llm and not targeted else 'disabled'}
+    enriched = time.perf_counter()
+    if detailed_guides:
+        for i, ds in enumerate(groups.values(), 1):
+            name = re.sub(r'\s*(시행령|시행규칙)$', '', ds[0].meta.law_name)
+            path = output_dir / safe_filename(f'{i}. {name} 관련 시행 안내', used)
+            generate_guide(ds, dt.date.today(), path)
+            created.append(path)
+            for d in ds:
+                file_map[id(d)] = path
+    if individual and details:
+        toc_lines = []
+        for i, d in enumerate(details, 1):
+            path = output_dir / safe_filename(f'{i:02d}. {guide_display_title(d.meta)}', used)
+            generate_guide([d], start, path)
+            created.append(path)
+            file_map[id(d)] = path
+            toc_lines.append(f'{i:02d}. [{d.publication_status}] {d.meta.law_name}')
+        toc = output_dir / '목차.docx'
+        write_period_toc_docx(toc, period_line, toc_lines)
+        created.append(toc)
+    if make_summary and details:
+        path = output_dir / '법령제개정_주요내용_요약.docx'
+        generate_summary_docx(details, path, period_line=period_line, guide_date=end,
+                              issue_date=start, use_llm=False)
+        created.append(path)
+    registry = write_registry(output_dir, candidates, file_map)
+    timings = dict(timings or {})
+    timings.update(enrichment_seconds=round(enriched-begun, 2),
+                   document_seconds=round(time.perf_counter()-enriched, 2))
+    timings['total_seconds'] = round(sum(timings.values()), 2)
+    report = {
+        'generated_at': dt.datetime.now().isoformat(timespec='seconds'),
+        'as_of': dt.date.today().isoformat(), 'mode': mode, 'period': period_line,
+        'date_from': start.isoformat(), 'date_to': end.isoformat(),
+        'selection_policy': SELECTION_POLICY, 'selection_counts': registry['counts'],
+        'publication_policy': 'effective-family' if detailed_guides else 'digest-only' if digest_only else 'individual-and-digest',
+        'delivery_status': 'pending_review',
+        'coverage_status': 'incomplete' if snapshot() else 'no_reported_errors',
+        'warnings': snapshot(), 'timings': timings, 'draft_cache_hits': hits,
+        'summary': {'detail_count': len(candidates), 'selected_count': len(details), 'effective_family_count': len(groups),
+                    'created_file_count': len(created),
+                    'individual_guide_count': len(set(file_map.values()))},
+        'files': [str(p.resolve()) for p in created],
+        'details': [{**_detail_report_item(d, file_map.get(id(d))),
+                     'publication_status': d.publication_status,
+                     'impact_evidence': d.impact_evidence, 'source_limit': source_limit(d),
+                     'selection': d.selection} for d in candidates],
+    }
+    (output_dir / 'published_details.json').write_text(
+        json.dumps([asdict(d) for d in details], ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    from .services.delivery import write_manifest
+    write_manifest(output_dir, details, created, file_map, report)
+    (output_dir / 'run_report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f'[law_change_auto] 탐지 {len(candidates)}건 / 우선 안내 {len(details)}건 / DOCX {len(created)}개 / 경고 {len(snapshot())}건', flush=True)
     return created
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(line_buffering=True)
     args = parse_args(argv)
     output_dir = Path(args.output_dir)
     law_filter = (args.law or "").strip()
@@ -560,24 +634,26 @@ def main(argv: list[str] | None = None) -> None:
 
     if not _gmod._get_gemini_key() and not _gmod._get_groq_key():
         print(
-            "[law_change_auto] 경고: GEMINI_API_KEY / GROQ_API_KEY가 없습니다. 파급효과는 기본 문구만 넣습니다.",
+            "[law_change_auto] 경고: GEMINI_API_KEY / GROQ_API_KEY가 없습니다. 파급효과를 생성 보류하고 배포 불가로 기록합니다.",
             flush=True,
         )
 
     if args.legislation:
         print("[law_change_auto] 입법예고/규정변경예고 모드")
-        result = process_legislation(output_dir, monitored_laws, law_filter)
+        result = process_legislation(output_dir, monitored_laws, law_filter,
+                                     selection_review=args.selection_review, use_llm=not args.no_summary_llm,
+                                     make_summary=not args.no_summary)
         if result:
-            print(f"[law_change_auto] 안내서 생성 완료: {result.resolve()}")
+            print(f"[law_change_auto] 선별 안내서 초안 {len(result)}개 생성; 배포 전 검증 필요")
         else:
-            print("[law_change_auto] 매칭되는 입법예고가 없거나 PDF 추출에 실패했습니다.")
+            print("[law_change_auto] 우선 안내 예고가 없습니다. 수집 결과와 후보 선별 검토 목록을 확인하세요.")
         return
 
     date_from_str = (args.date_from or "").strip()
     date_to_str = (args.date_to or "").strip()
 
     if date_from_str and date_to_str:
-        # 종합 기간 모드: 법령·행정규칙·입법예고를 한 안내서로 통합
+        # 기간 모드: 개별 안내서·목차·요약을 기본 생성
         date_from = _resolve_target_date(date_from_str)
         date_to = _resolve_target_date(date_to_str)
         if date_from > date_to:
@@ -585,19 +661,24 @@ def main(argv: list[str] | None = None) -> None:
             return
         total_days = (date_to - date_from).days + 1
         print(f"[law_change_auto] 종합 기간 모드: {date_from.isoformat()} ~ {date_to.isoformat()} ({total_days}일)")
-        print("[law_change_auto] 법령·시행령·행정규칙·입법예고 건별 안내서 생성 중...")
+        print("[law_change_auto] 개별 안내서·목차·요약 초안 생성 중 (요약만: --digest-only)...")
 
         created = _process_comprehensive_period(
             output_dir, monitored_laws, law_filter, date_from, date_to,
             make_summary=not args.no_summary,
             summary_use_llm=not args.no_summary_llm,
+            detailed_guides=args.detailed_guides,
+            digest_only=args.digest_only,
+            selection_review=args.selection_review,
         )
         if created:
             for path in created:
                 print(f"[law_change_auto] 생성: {path.name}")
-            print(f"[law_change_auto] 총 {len(created)}개 파일 생성 완료")
+            print(f"[law_change_auto] 초안 {len(created)}개 생성. 배포 전 delivery_manifest.json 검증·원문 대조·전 페이지 검수 필요")
         else:
-            print("[law_change_auto] 해당 기간에 매칭되는 변경이 없습니다.")
+            from .services.diagnostics import snapshot
+            print("[law_change_auto] 생성된 DOCX 없음. 수집 경고와 후보 건수는 run_report.json을 확인하세요."
+                  if snapshot() or args.no_summary else "[law_change_auto] 우선 안내 대상이 없습니다. candidate_selection.json의 참고·확인·보류 후보를 확인하세요.")
     else:
         # 단일 날짜 모드
         target_date = _resolve_target_date(args.date)
@@ -608,17 +689,18 @@ def main(argv: list[str] | None = None) -> None:
             output_dir,
             monitored_laws,
             law_filter,
-            create_example_if_empty=True,
+            create_example_if_empty=False,
             no_web_check=args.no_web_check,
             make_summary=not args.no_summary,
             summary_use_llm=not args.no_summary_llm,
+            selection_review=args.selection_review,
         )
         if created:
             for path in created:
                 print(f"[law_change_auto] 생성: {path.name}")
-            print(f"[law_change_auto] 안내서 생성 완료 ({len(created)}개)")
+            print(f"[law_change_auto] 안내서 초안 생성 ({len(created)}개); 배포 전 원문 대조·전 페이지 검수 필요")
         else:
-            print("[law_change_auto] 해당 일자에 매칭되는 변경이 없습니다.")
+            print("[law_change_auto] 우선 안내 대상이 없습니다. 후보 선별 검토 목록을 확인하세요.")
 
 
 if __name__ == "__main__":

@@ -115,10 +115,10 @@ def _groq_post(law_name: str, payload: dict) -> Optional[dict]:
                 print(f"[Groq] {law_name}: 429 rate limit, {wait:.0f}초 후 재시도 ({attempt + 1}/{len(GROQ_429_WAITS)})")
                 time.sleep(wait)
                 continue
-            print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
+            print(f"[Groq] {law_name}: {type(e).__name__}")
             return None
         except Exception as e:
-            print(f"[Groq] {law_name}: {type(e).__name__}: {e}")
+            print(f"[Groq] {law_name}: {type(e).__name__}")
             return None
     return None
 
@@ -166,7 +166,7 @@ def _clean_text(text: str) -> Optional[str]:
     return text if len(text) >= 12 else None
 
 
-def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
+def _fetch_from_gemini(law_name: str, prompt: str, *, evidence: dict | None = None) -> Optional[str]:
     """Gemini API 호출. 429 시 최대 3회 retry. 서킷 오픈 시 즉시 None(→Groq)."""
     api_key = _get_gemini_key()
     if not api_key or _gemini_disabled:
@@ -204,6 +204,9 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
                 if not p.get("thought") and (p.get("text") or "").strip()
             ]
             _note_gemini_ok()
+            if texts and evidence is not None:
+                evidence.update(provider='Gemini', model=data.get('modelVersion') or GEMINI_MODEL,
+                                response_id=data.get('responseId'), usage=data.get('usageMetadata', {}))
             return _clean_text(" ".join(texts).strip()) if texts else None
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
@@ -216,7 +219,7 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
                 print(f"[Gemini] {law_name}: 429 할당량 초과, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
-            print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
+            print(f"[Gemini] {law_name}: {type(e).__name__}")
             return None
         except Exception as e:
             err_str = str(e)
@@ -229,14 +232,14 @@ def _fetch_from_gemini(law_name: str, prompt: str) -> Optional[str]:
                 print(f"[Gemini] {law_name}: rate limit, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
-            print(f"[Gemini] {law_name}: {type(e).__name__}: {e}")
+            print(f"[Gemini] {law_name}: {type(e).__name__}")
             return None
 
     print(f"[Gemini] {law_name}: {max_retries}회 재시도 모두 실패 → Groq fallback")
     return None
 
 
-def _fetch_from_groq(law_name: str, prompt: str) -> Optional[str]:
+def _fetch_from_groq(law_name: str, prompt: str, *, evidence: dict | None = None) -> Optional[str]:
     """Groq API 호출 (Gemini 실패 시 fallback)."""
     data = _groq_post(
         law_name,
@@ -253,6 +256,9 @@ def _fetch_from_groq(law_name: str, prompt: str) -> Optional[str]:
     text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     result = _clean_text(text) if text else None
     if result:
+        if evidence is not None:
+            evidence.update(provider='Groq', model=data.get('model') or GROQ_MODEL,
+                            response_id=data.get('id'), usage=data.get('usage', {}))
         print(f"[Groq] {law_name}: 파급효과 생성 성공")
     return result
 
@@ -312,7 +318,7 @@ def _fetch_comparison_from_groq(law_name: str, prompt: str) -> list[dict] | None
                 return v
         return None
     except Exception as e:
-        print(f"[Groq] {law_name}: 신구조문 추출 실패: {e}")
+        print(f"[Groq] {law_name}: 신구조문 추출 실패: {type(e).__name__}")
         return None
 
 
@@ -354,7 +360,7 @@ def _fetch_comparison_from_gemini(law_name: str, prompt: str) -> list[dict] | No
     except Exception as e:
         if "429" in str(e) or "ResourceExhausted" in type(e).__name__:
             _note_gemini_429()
-        print(f"[Gemini] {law_name}: 신구조문 추출 실패: {e}")
+        print(f"[Gemini] {law_name}: 신구조문 추출 실패: {type(e).__name__}")
         return None
 
 
@@ -395,7 +401,7 @@ def fetch_impact_text(
 ) -> Optional[str]:
     """
     파급효과 문구 생성: Gemini(1순위) → Groq(fallback) → None.
-    None 반환 시 호출부에서 기본 문구로 대체.
+    레거시 텍스트 API. 배포용 파급효과는 enrichment의 호출 증거를 동반해야 함.
     """
     reason_text = " ".join(reason_paras).strip() if reason_paras else ""
     main_text = " ".join(main_paras).strip() if main_paras else ""
@@ -444,7 +450,8 @@ def _clean_summary(text: Optional[str]) -> Optional[str]:
     for pref in ("요약:", "요약 :", "주요내용:", "- "):
         if line.startswith(pref):
             line = line[len(pref):].strip()
-    line = line.lstrip("1234567890.가나다라마바·◎- \t")
+    import re
+    line = re.sub(r'^\s*(?:(?:\d+|[가나다라마바사아])\.\s+|[·◎-]\s*)', '', line)
     if len(line) > _SUMMARY_MAX_LEN:
         line = line[:_SUMMARY_MAX_LEN].rstrip() + "…"
     return line if len(line) >= 6 else None

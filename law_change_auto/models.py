@@ -32,6 +32,7 @@ class LawChangeMeta:
     law_type: Literal["ls", "admrul"] | None = None
     lsi_seq: str | None = None       # 법령 일련번호 (lsInfoP용)
     admrul_seq: str | None = None    # 행정규칙 일련번호 (admRulLsInfoP, admrulOldAndNew용)
+    calendar_event_date: date | None = None  # 공포·시행일과 별개인 달력 이벤트 날짜
 
 
 # (text, style): style은 "normal" | "ins" | "del"
@@ -62,7 +63,13 @@ class LawChangeDetail:
     article_comparisons: list[ArticleComparisonRow] = field(default_factory=list)
     opinion_deadline: str | None = None  # 입법예고/규정변경예고 의견제출 마감일 (예: "2026. 4. 7.")
     comparison_pdf_paths: list[tuple[str, str]] = field(default_factory=list)  # [(label, saved_path), ...] 입법예고용
-    impact_analysis: str | None = None  # (선택) 사전 생성 파급효과 — 미사용 시 generator에서 Gemini
+    impact_analysis: str | None = None  # 호출 증거와 결합된 초안; 렌더러는 네트워크 호출하지 않음
+    impact_evidence: dict = field(default_factory=dict)  # transport response + source/prompt/output hashes
+    impact_correction: dict = field(default_factory=dict)  # retain original API draft when edited
+    source_limit: str | None = None  # missing/conflicting source; never infer company obligations
+    summary_text: str | None = None
+    publication_status: str | None = None
+    selection: dict = field(default_factory=dict)  # source-bound applicability triage, distinct from dates
     attachments: list[dict] = field(default_factory=list)  # moleg 입법예고 첨부 [{"name":..,"url":..}]
 
     def has_any_content(self) -> bool:
@@ -77,4 +84,3 @@ class LawChangeDetail:
 
 
 LawChangeDetailSeq = Sequence[LawChangeDetail]
-

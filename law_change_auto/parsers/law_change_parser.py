@@ -142,6 +142,12 @@ def _parse_revision_reason(html: str, source_type: str = "ls") -> list[str]:
     return results
 
 
+def _strip_html_tags(text: str) -> str:
+    # Legal notations such as <삭  제>, <신  설>, <2026. 4. 28.> are evidence,
+    # not HTML. HTML tag names start with an ASCII letter.
+    return re.sub(r'<!--.*?-->|</?[A-Za-z][^>]*>', '', text, flags=re.DOTALL)
+
+
 def _clean_markup(text: str) -> str:
     """XML 내에 섞여 있는 HTML 태그(<p>, <br>
 등)를 정리한다."""
@@ -154,7 +160,7 @@ def _clean_markup(text: str) -> str:
     text = re.sub(r"<p\s*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
     # 남은 태그 제거
-    text = re.sub(r"<[^>]+>", "", text)
+    text = _strip_html_tags(text)
     # 연속 개행 정리
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -167,7 +173,8 @@ def _extract_segments_from_element(el: ET.Element) -> list[tuple[str, str]]:
     - XML에 ins/del 자식 요소가 있으면 구조 순회
     - 내부가 HTML 문자열(예: &lt;ins&gt;추가&lt;/ins&gt;)이면 BeautifulSoup으로 파싱
     """
-    raw_html = ET.tostring(el, encoding="unicode", method="xml")
+    # Do not send the Korean XML wrapper (e.g. 조문) to the HTML parser.
+    raw_html = (el.text or '') + ''.join(ET.tostring(child, encoding="unicode") for child in el)
     raw_html = html_module.unescape(raw_html)
 
     # HTML 문자열로 ins/del이 포함된 경우 BeautifulSoup으로 파싱
@@ -185,14 +192,14 @@ def _extract_segments_from_element(el: ET.Element) -> list[tuple[str, str]]:
                         style = "del"
                     for c in node.children:
                         if isinstance(c, str):
-                            t = re.sub(r"<[^>]+>", "", c).strip()
+                            t = _strip_html_tags(c).strip()
                             t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
                             if t:
                                 html_segments.append((t, style))
                         else:
                             _collect(c, style)
                 elif isinstance(node, str):
-                    t = re.sub(r"<[^>]+>", "", node).strip()
+                    t = _strip_html_tags(node).strip()
                     if t:
                         html_segments.append((t, inherit))
 
@@ -211,7 +218,7 @@ def _extract_segments_from_element(el: ET.Element) -> list[tuple[str, str]]:
         t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
         t = re.sub(r"<p\s*>", "", t, flags=re.IGNORECASE)
         t = re.sub(r"</p\s*>", "\n", t, flags=re.IGNORECASE)
-        t = re.sub(r"<[^>]+>", "", t)
+        t = _strip_html_tags(t)
         t = t.strip()
         if t:
             segments.append((t, style))
